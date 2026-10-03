@@ -39,3 +39,9 @@ Use the default canonical triage labels.
 ### Domain docs
 
 This is a single-context offline PhonePe expense-tracking application. Keep OCR, receipt parsing, expense review, local storage, and UI concerns separated.
+
+## Gemini Android Studio Agent Mode
+
+Gemini Agent Mode may be used only as a read-only diagnosis and inspection assistant, including exploration of a dedicated synthetic-only emulator. It may inspect source and report findings or recommendations, but must not edit files, generate/apply patches, change dependencies or configuration, or commit. Follow [docs/gemini-agent-mode.md](docs/gemini-agent-mode.md) for onboarding, privacy, device boundaries, and prompts. Ask for explicit approval before any shell command, build, deploy, or device interaction because these can have local side effects. Never provide real financial data, sensitive/real-receipt OCR content, or screenshots, logs, or other outputs containing private data. Synthetic-only diagnostic outputs may be shared only with explicit human approval. `.aiexclude` is context control, not a sandbox or a guarantee against explicit sharing.
+
+Codemode requirements above apply to Pi tools when available; they do not imply that Gemini has Pi tools or can invoke them. Preserve Sol orchestration and Luna-only code authorship: Gemini recommendations go to Sol for review and, if approved, implementation by Luna.

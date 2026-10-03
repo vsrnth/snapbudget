@@ -1,0 +1,55 @@
+# Gemini Agent Mode context exclusions. This is not a sandbox or a secrecy guarantee.
+# Keep project guidance, source, docs, and synthetic textual test fixtures visible.
+
+# Repository/editor/build state and generated outputs.
+.git/
+.idea/
+.gradle/
+.kotlin/
+**/build/
+local.properties
+
+# Pi runtime/session artifacts only; leave checked-in skills and guidance visible.
+.pi/sessions/
+.pi/agent/
+.pi/subagents/
+.pi/artifacts/
+.pi/reports/
+.pi/logs/
+
+# Environment files, secrets, signing material, and credential stores.
+.env
+.env.*
+**/.env
+**/.env.*
+**/*credentials*
+**/*secret*
+**/*token*
+**/*.keystore
+**/*.jks
+**/*.p12
+**/*.pfx
+**/*.pem
+**/*.key
+
+# Screenshots and image fixtures are excluded by default, including synthetic ones.
+# A user must explicitly choose any image to share with Gemini.
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.webp
+**/*.gif
+**/*.bmp
+**/*.heic
+**/*.tif
+**/*.tiff
+
+# Logs, local databases, exports, and private-data directories.
+**/*.log
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.dump
+**/*export*/
+**/*private-data*/
+**/*personal-data*/
