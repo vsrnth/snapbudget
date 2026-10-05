@@ -1,6 +1,6 @@
 # SnapBudget
 
-SnapBudget is an offline-first Android expense tracker. The launcher supports manual expense entry and user-selected receipt-image import, review before save, all-time totals, and explicit deletion. Confirmed expenses are stored locally. Receipt images are read transiently for on-device OCR and are not retained. See [docs/testing.md](docs/testing.md) for coverage and limitations.
+SnapBudget is an offline-first Android expense tracker. The launcher supports manual expense entry and user-selected receipt-image import, review before save, all-time totals, and explicit deletion. Receipt import currently supports eligible PhonePe receipts and completed outgoing Google Pay UPI receipts through separate provider parser strategies. Confirmed expenses are stored locally. Receipt images are read transiently for on-device OCR and are not retained. See [docs/testing.md](docs/testing.md) for coverage and limitations.
 
 ## Local checks
 
@@ -19,6 +19,6 @@ scripts/test-local.sh device --serial emulator-5554
 scripts/test-local.sh all --serial emulator-5554
 ```
 
-Device tests are local-only and reject CI. The selected device must already be offline (airplane mode enabled and Wi-Fi disabled); the runner never changes device networking or boots/manipulates devices. Date parsing is covered by JVM assertions, including strict calendar validation. An earlier API 37 emulator run completed with 24/24 tests passing. The latest focused OCR retry tests passed 14/14; the latest full 34-test suite remains pending after concurrent instrumentation/deployment activity interrupted the runs. API 36 runtime validation remains pending. See the [test guide](docs/testing.md) for details.
+Device tests are local-only and reject CI. The selected device must already be offline (airplane mode enabled and Wi-Fi disabled); the runner never changes device networking or boots/manipulates devices. Date parsing is covered by JVM assertions, including strict calendar validation. Latest verified results: full API 37 instrumentation 34/34, focused OCR/retry instrumentation 14/14, and host runner tests 20/20; offline JVM, debug/test/release build, and lint checks are green. A separate approved comparison on two local inputs matched in the production reader using only whitelisted boolean/enum output. These OCR/device checks use synthetic fixtures except for that separate comparison; no private OCR values, identifiers, names, or images are documented. API 36 runtime validation remains pending. See the [test guide](docs/testing.md) for coverage and limitations.
 
 For optional read-only Gemini Android Studio Agent Mode setup and safety boundaries, see [docs/gemini-agent-mode.md](docs/gemini-agent-mode.md).
