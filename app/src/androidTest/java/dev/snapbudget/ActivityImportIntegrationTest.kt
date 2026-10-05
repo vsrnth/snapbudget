@@ -5,7 +5,6 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.snapbudget.ui.ExpensePage
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -27,22 +26,22 @@ class ActivityImportIntegrationTest {
     }
 
     @Test
-    fun lifecycleFactoryRetainsReviewedDraftAcrossHostRecreation() {
+    fun lifecycleFactoryRetainsEditorFieldsAcrossHostRecreation() {
         ActivityScenario.launch(FixtureSavedStateActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->
+                activity.expenseViewModel.openEditor()
                 activity.expenseViewModel.updateMerchant("Fixture shop")
                 activity.expenseViewModel.updateAmount("12.34")
                 activity.expenseViewModel.updateDateTime("2025-01-02T03:04")
                 activity.expenseViewModel.updateCategory("Food")
-                activity.expenseViewModel.review()
-                assertEquals(ExpensePage.REVIEW, activity.expenseViewModel.state.value.page)
+                assertEquals(ExpensePage.EDIT, activity.expenseViewModel.state.value.page)
             }
             scenario.recreate()
             scenario.onActivity { activity ->
-                assertEquals(ExpensePage.REVIEW, activity.expenseViewModel.state.value.page)
+                assertEquals(ExpensePage.EDIT, activity.expenseViewModel.state.value.page)
                 assertEquals("Fixture shop", activity.expenseViewModel.state.value.merchant)
                 assertEquals("12.34", activity.expenseViewModel.state.value.amount)
-                assertNotNull(activity.expenseViewModel.state.value.draft)
+                assertEquals(0, activity.expenseViewModel.state.value.expenses.size)
             }
         }
     }

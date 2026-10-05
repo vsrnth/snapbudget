@@ -42,7 +42,7 @@ private val strictLocalDateTimeFormatter = DateTimeFormatterBuilder()
     .toFormatter(Locale.ROOT)
     .withResolverStyle(ResolverStyle.STRICT)
 
-enum class ExpensePage { LIST, EDIT, REVIEW }
+enum class ExpensePage { LIST, EDIT }
 
 data class ExpenseUiState(
     val expenses: List<ExpenseRecord> = emptyList(),
@@ -56,8 +56,6 @@ data class ExpenseUiState(
     val saving: Boolean = false,
     val deletingId: Long? = null,
     val errorMessage: String? = null,
-    val draft: ManualExpenseDraft? = null,
-    val importedDraft: ImportedExpenseDraft? = null,
     val sourceImageHash: String? = null,
     val sourceTransactionId: String? = null,
     val readingImage: Boolean = false,
@@ -123,7 +121,7 @@ class ExpenseViewModel(
 
     fun openEditor() {
         if (_state.value.committing || _state.value.addingCategory) return
-        _state.update { it.copy(page = ExpensePage.EDIT, errors = emptyMap(), errorMessage = null, draft = null, importedDraft = null, sourceImageHash = null, sourceTransactionId = null, duplicateImport = false, categoryDialogOpen = false) }
+        _state.update { it.copy(page = ExpensePage.EDIT, errors = emptyMap(), errorMessage = null, sourceImageHash = null, sourceTransactionId = null, duplicateImport = false, categoryDialogOpen = false) }
         savedState.remove<String>("importImageHash")
         savedState.remove<String>("importTransactionId")
         savedState["readingImage"] = false
@@ -156,7 +154,7 @@ class ExpenseViewModel(
         imageReadJob?.cancel()
         _state.update { it.copy(
             page = ExpensePage.EDIT, readingImage = true, errors = emptyMap(), errorMessage = null,
-            draft = null, importedDraft = null, sourceImageHash = null, sourceTransactionId = null,
+            sourceImageHash = null, sourceTransactionId = null,
             merchant = "", amount = "", dateTime = "", category = "Other", duplicateImport = false,
         ) }
         savedState["merchant"] = ""
@@ -181,12 +179,11 @@ class ExpenseViewModel(
                             dateTime = preview.dateTime?.format(strictLocalDateTimeFormatter).orEmpty(),
                             category = "Other",
                             page = ExpensePage.EDIT,
-                            importedDraft = null,
                             sourceImageHash = preview.imageHash,
                             sourceTransactionId = preview.transactionId,
                             errors = emptyMap(), errorMessage = null,
                         ) }
-                        // An incomplete preview remains editable but is validated before review.
+                        // An incomplete preview remains editable but is validated before saving.
                         savedState["merchant"] = preview.merchant.orEmpty()
                         savedState["amount"] = preview.amountPaise?.let { paise -> "${paise / 100}.${(paise % 100).toString().padStart(2, '0')}" }.orEmpty()
                         savedState["dateTime"] = preview.dateTime?.format(strictLocalDateTimeFormatter).orEmpty()
@@ -319,98 +316,63 @@ class ExpenseViewModel(
 
     private fun updateField(key: String, value: String, change: ExpenseUiState.() -> ExpenseUiState) {
         if (_state.value.committing || _state.value.readingImage) return
-        _state.update { it.change().copy(errors = it.errors - key, errorMessage = null, draft = null, importedDraft = null, duplicateImport = false) }
+        _state.update { it.change().copy(errors = it.errors - key, errorMessage = null, duplicateImport = false) }
         savedState[key] = value
         savedState["operationToken"] = null
         _state.value.sourceImageHash?.let { persistImportState(it, _state.value.sourceTransactionId) }
     }
 
-    fun review() {
+    fun saveExpense() {
         val s = _state.value
-        if (s.committing || s.readingImage || s.addingCategory) return
-        if (s.sourceImageHash != null) {
-            val corrected = ImportedExpenseDraft.create(
+        if (s.page != ExpensePage.EDIT || s.committing || s.readingImage || s.addingCategory || s.duplicateImport || s.deletingId != null) return
+        val importedDraft = s.sourceImageHash?.let { hash ->
+            ImportedExpenseDraft.create(
                 parsePositivePaise(s.amount) ?: 0L, s.merchant, s.dateTime, s.category,
-                s.sourceImageHash, s.sourceTransactionId,
+                hash, s.sourceTransactionId,
             )
-            if (corrected == null) {
-                val errors = buildMap {
-                    if (s.merchant.trim().isEmpty() || s.merchant.length > 120) put("merchant", "Enter a merchant name (up to 120 characters).")
-                    if (parsePositivePaise(s.amount) == null) put("amount", "Enter an amount greater than ₹0, with up to two decimal places.")
-                    if (!ExpenseDateTimeFormat.isValidInput(s.dateTime)) put("dateTime", "Enter a valid date and time, for example ${ExpenseDateTimeFormat.EXAMPLE}.")
-                    if (s.category.trim().isEmpty() || s.category.length > 60) put("category", "Enter a category (up to 60 characters).")
-                }
-                _state.update { it.copy(errors = errors) }
-                return
-            }
-            _state.update { it.copy(page = ExpensePage.REVIEW, draft = null, importedDraft = corrected, errors = emptyMap(), errorMessage = null, duplicateImport = false) }
-            persistImportState(corrected.imageHash, corrected.transactionId)
-            persist()
-            return
         }
-        val token = savedState.get<String>("operationToken") ?: "manual:${UUID.randomUUID()}".also {
-            savedState["operationToken"] = it
-        }
-        val draft = ManualExpenseDraft.createWithToken(s.amount, s.merchant, s.dateTime, s.category, token)
-        if (draft == null) {
+        val manualDraft = if (s.sourceImageHash == null) {
+            val token = savedState.get<String>("operationToken") ?: "manual:${UUID.randomUUID()}".also { savedState["operationToken"] = it }
+            ManualExpenseDraft.createWithToken(s.amount, s.merchant, s.dateTime, s.category, token)
+        } else null
+        if (manualDraft == null && importedDraft == null) {
             val errors = buildMap {
                 if (s.merchant.trim().isEmpty() || s.merchant.length > 120) put("merchant", "Enter a merchant name (up to 120 characters).")
                 if (parsePositivePaise(s.amount) == null) put("amount", "Enter an amount greater than ₹0, with up to two decimal places.")
                 if (!ExpenseDateTimeFormat.isValidInput(s.dateTime)) put("dateTime", "Enter a valid date and time, for example ${ExpenseDateTimeFormat.EXAMPLE}.")
                 if (s.category.trim().isEmpty() || s.category.length > 60) put("category", "Enter a category (up to 60 characters).")
             }
-            _state.update { it.copy(errors = errors, draft = null) }
+            _state.update { it.copy(errors = errors) }
             return
         }
-        _state.update { it.copy(page = ExpensePage.REVIEW, draft = draft, importedDraft = null, errors = emptyMap(), errorMessage = null, duplicateImport = false) }
-        persist()
-    }
-
-    fun editReview() {
-        if (_state.value.committing) return
-        _state.update { it.copy(page = ExpensePage.EDIT, errors = emptyMap(), errorMessage = null) }
-        persist()
-    }
-
-    fun confirmSave() {
-        val current = _state.value
-        if (current.page != ExpensePage.REVIEW || current.committing || current.duplicateImport) return
-        val manualDraft = current.draft
-        val importedDraft = current.importedDraft
-        if ((manualDraft == null) == (importedDraft == null)) return
-        if (manualDraft != null) {
-            val token = savedState.get<String>("operationToken") ?: return
-            val currentDraft = ManualExpenseDraft.createWithToken(current.amount, current.merchant, current.dateTime, current.category, token) ?: return
-            if (manualDraft.amountPaise != currentDraft.amountPaise || manualDraft.merchant != currentDraft.merchant || manualDraft.dateTime != currentDraft.dateTime || manualDraft.category != currentDraft.category || manualDraft.operationToken != currentDraft.operationToken) return
-        }
-        if (importedDraft != null) {
-            val currentDraft = ImportedExpenseDraft.create(
-                parsePositivePaise(current.amount) ?: return, current.merchant, current.dateTime, current.category,
-                current.sourceImageHash ?: return, current.sourceTransactionId,
-            ) ?: return
-            if (importedDraft.amountPaise != currentDraft.amountPaise || importedDraft.merchant != currentDraft.merchant || importedDraft.dateTime != currentDraft.dateTime || importedDraft.category != currentDraft.category || importedDraft.imageHash != currentDraft.imageHash || importedDraft.transactionId != currentDraft.transactionId) return
-        }
-        _state.update { it.copy(saving = true, errorMessage = null) }
+        _state.update { it.copy(saving = true, errors = emptyMap(), errorMessage = null) }
         viewModelScope.launch {
-            if (importedDraft != null) {
-                val importRepository = importedExpenseRepository
-                val result = if (importRepository == null) ConfirmImportedExpenseResult.Failed else ConfirmImportedExpense(importRepository)(importedDraft, confirmed = true)
-                when (result) {
-                    is ConfirmImportedExpenseResult.Inserted -> clearAfterSave()
-                    ConfirmImportedExpenseResult.Duplicate -> _state.update { it.copy(saving = false, duplicateImport = true, errorMessage = "This receipt was already imported. No second expense was created.") }
-                    ConfirmImportedExpenseResult.Failed, ConfirmImportedExpenseResult.NotConfirmed -> _state.update { it.copy(saving = false, errorMessage = "Expense could not be saved. Retry to try again.") }
+            try {
+                if (importedDraft != null) {
+                    val importRepository = importedExpenseRepository
+                    val result = if (importRepository == null) ConfirmImportedExpenseResult.Failed else ConfirmImportedExpense(importRepository)(importedDraft, confirmed = true)
+                    when (result) {
+                        is ConfirmImportedExpenseResult.Inserted -> clearAfterSave()
+                        ConfirmImportedExpenseResult.Duplicate -> _state.update { it.copy(saving = false, duplicateImport = true, errorMessage = "This receipt was already imported. No second expense was created.") }
+                        ConfirmImportedExpenseResult.Failed, ConfirmImportedExpenseResult.NotConfirmed -> _state.update { it.copy(saving = false, errorMessage = "Expense could not be saved. Retry to try again.") }
+                    }
+                } else when (ConfirmManualExpense(repository)(requireNotNull(manualDraft), confirmed = true)) {
+                    is ConfirmManualExpenseResult.Inserted -> clearAfterSave()
+                    ConfirmManualExpenseResult.Duplicate -> _state.update { it.copy(saving = false, errorMessage = "This expense was already saved. You can safely retry or return to your expenses.") }
+                    ConfirmManualExpenseResult.Failed, ConfirmManualExpenseResult.NotConfirmed -> _state.update { it.copy(saving = false, errorMessage = "Expense could not be saved. Please try again.") }
                 }
-            } else when (ConfirmManualExpense(repository)(manualDraft!!, confirmed = true)) {
-                is ConfirmManualExpenseResult.Inserted -> clearAfterSave()
-                ConfirmManualExpenseResult.Duplicate -> _state.update { it.copy(saving = false, errorMessage = "This expense was already saved. You can safely retry or return to your expenses.") }
-                ConfirmManualExpenseResult.Failed, ConfirmManualExpenseResult.NotConfirmed -> _state.update { it.copy(saving = false, errorMessage = "Expense could not be saved. Please try again.") }
+            } catch (cancelled: CancellationException) {
+                _state.update { it.copy(saving = false) }
+                throw cancelled
+            } catch (_: Exception) {
+                _state.update { it.copy(saving = false, errorMessage = "Expense could not be saved. Please try again.") }
             }
         }
     }
 
     private fun clearAfterSave() {
         savedState["operationToken"] = null
-        _state.update { it.copy(saving = false, page = ExpensePage.LIST, draft = null, importedDraft = null, sourceImageHash = null, sourceTransactionId = null, merchant = "", amount = "", category = "Other", dateTime = now(), errorMessage = null, duplicateImport = false) }
+        _state.update { it.copy(saving = false, page = ExpensePage.LIST, sourceImageHash = null, sourceTransactionId = null, merchant = "", amount = "", category = "Other", dateTime = now(), errorMessage = null, duplicateImport = false) }
         clearSavedForm()
     }
 
@@ -419,7 +381,7 @@ class ExpenseViewModel(
         imageReadGeneration++
         imageReadJob?.cancel()
         imageReadJob = null
-        _state.update { it.copy(page = ExpensePage.LIST, merchant = "", amount = "", dateTime = now(), category = "Other", errors = emptyMap(), errorMessage = null, draft = null, importedDraft = null, sourceImageHash = null, sourceTransactionId = null, saving = false, readingImage = false, duplicateImport = false, categoryDialogOpen = false) }
+        _state.update { it.copy(page = ExpensePage.LIST, merchant = "", amount = "", dateTime = now(), category = "Other", errors = emptyMap(), errorMessage = null, sourceImageHash = null, sourceTransactionId = null, saving = false, readingImage = false, duplicateImport = false, categoryDialogOpen = false) }
         clearSavedForm()
     }
 
@@ -460,22 +422,19 @@ class ExpenseViewModel(
         savedState["readingImage"] = _state.value.readingImage
     }
     private fun restoreState(): ExpenseUiState {
-        val page = savedState.get<String>("page")?.let { runCatching { ExpensePage.valueOf(it) }.getOrNull() } ?: ExpensePage.LIST
+        val rawPage = savedState.get<String>("page")
+        val page = if (rawPage == "REVIEW") ExpensePage.EDIT else rawPage?.let { runCatching { ExpensePage.valueOf(it) }.getOrNull() } ?: ExpensePage.LIST
+        if (rawPage == "REVIEW") savedState["page"] = ExpensePage.EDIT.name
         val merchant = savedState["merchant"] ?: ""
         val amount = savedState["amount"] ?: ""
         val dateTime = savedState["dateTime"] ?: LocalDateTime.now().format(DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm"))
         val category = savedState["category"] ?: "Other"
-        val draft = if (page == ExpensePage.REVIEW) savedState.get<String>("operationToken")?.let { ManualExpenseDraft.createWithToken(amount, merchant, dateTime, category, it) } else null
         val importHash = savedState.get<String>("importImageHash")
-        val imported = if (importHash != null && page == ExpensePage.REVIEW) ImportedExpenseDraft.create(
-            parsePositivePaise(amount) ?: return ExpenseUiState(page = ExpensePage.EDIT, merchant = merchant, amount = amount, dateTime = dateTime, category = category),
-            merchant, dateTime, category, importHash, savedState.get("importTransactionId"),
-        ) else null
         val reading = savedState.get<Boolean>("readingImage") == true
         return ExpenseUiState(
-            page = when { reading -> ExpensePage.EDIT; page == ExpensePage.REVIEW && draft == null && imported == null -> ExpensePage.EDIT; else -> page },
+            page = if (reading) ExpensePage.EDIT else page,
             merchant = merchant, amount = amount, dateTime = dateTime, category = category,
-            draft = draft, importedDraft = imported, sourceImageHash = importHash,
+            sourceImageHash = importHash,
             sourceTransactionId = savedState.get("importTransactionId"), readingImage = false,
             errorMessage = if (reading) "Select the receipt image again to continue." else null,
         )

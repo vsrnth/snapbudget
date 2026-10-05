@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
@@ -58,7 +59,6 @@ fun ExpenseScreen(viewModel: ExpenseViewModel, onChooseTransactionImage: () -> U
         when {
             state.committing -> Unit
             state.deletingId != null -> viewModel.dismissDelete()
-            state.page == ExpensePage.REVIEW -> viewModel.editReview()
             else -> viewModel.cancelEditor()
         }
     }
@@ -74,7 +74,6 @@ fun ExpenseScreen(viewModel: ExpenseViewModel, onChooseTransactionImage: () -> U
                 when (state.page) {
                     ExpensePage.LIST -> ExpenseList(state, viewModel, onChooseTransactionImage)
                     ExpensePage.EDIT -> Editor(state, viewModel, onChooseTransactionImage)
-                    ExpensePage.REVIEW -> Review(state, viewModel)
                 }
                 Text("Your expenses stay on this device. No accounts or uploads.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("privacy-note").padding(bottom = 12.dp))
             }
@@ -164,7 +163,7 @@ private fun ExpenseList(state: ExpenseUiState, vm: ExpenseViewModel, onChooseTra
 @Composable
 private fun Editor(state: ExpenseUiState, vm: ExpenseViewModel, onChooseTransactionImage: () -> Unit) {
     Text("Add expense", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.testTag("editor-title"))
-    Text("Enter the details below. Your expense is saved only after you confirm.", style = MaterialTheme.typography.bodyMedium)
+    Text("Enter the details below. Nothing is saved until you choose Save expense.", style = MaterialTheme.typography.bodyMedium)
     OutlinedButton(onClick = onChooseTransactionImage, enabled = !state.readingImage && !state.committing, modifier = Modifier.fillMaxWidth().testTag("choose-transaction-image")) { Text("Choose transaction image") }
     if (state.readingImage) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -172,14 +171,19 @@ private fun Editor(state: ExpenseUiState, vm: ExpenseViewModel, onChooseTransact
         TextButton(onClick = vm::onImageSelectionCancelled, modifier = Modifier.testTag("cancel-image-reading")) { Text("Cancel") }
     }
     if (state.sourceTransactionId != null) Text("Transaction ID: ${state.sourceTransactionId}", modifier = Modifier.testTag("transaction-identity"))
-    EntryField("Merchant", state.merchant, vm::updateMerchant, state.errors["merchant"], tag = "merchant-input")
-    EntryField("Amount in INR", state.amount, vm::updateAmount, state.errors["amount"], keyboard = KeyboardType.Decimal, tag = "amount-input", prefix = "₹")
-    EntryField("Date and time", ExpenseDateTimeFormat.canonicalToReadable(state.dateTime), vm::updateDateTime, state.errors["dateTime"], tag = "datetime-input", supporting = "Example: ${ExpenseDateTimeFormat.EXAMPLE}")
+    EntryField("Merchant", state.merchant, vm::updateMerchant, state.errors["merchant"], tag = "merchant-input", enabled = !state.committing && !state.readingImage)
+    EntryField("Amount in INR", state.amount, vm::updateAmount, state.errors["amount"], keyboard = KeyboardType.Decimal, tag = "amount-input", prefix = "₹", enabled = !state.committing && !state.readingImage)
+    EntryField("Date and time", ExpenseDateTimeFormat.canonicalToReadable(state.dateTime), vm::updateDateTime, state.errors["dateTime"], tag = "datetime-input", supporting = "Example: ${ExpenseDateTimeFormat.EXAMPLE}", enabled = !state.committing && !state.readingImage)
     CategoryField(state, vm)
     state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("recoverable-error")) }
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        OutlinedButton(onClick = vm::cancelEditor, enabled = !state.committing && !state.readingImage, modifier = Modifier.weight(1f).testTag("cancel-entry")) { Text("Cancel") }
-        Button(onClick = vm::review, enabled = !state.committing && !state.readingImage, modifier = Modifier.weight(1f).testTag("review-expense")) { Text("Review") }
+        OutlinedButton(onClick = vm::cancelEditor, enabled = !state.committing && !state.readingImage, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag(if (state.duplicateImport) "return-after-duplicate" else "cancel-entry")) { Text(if (state.duplicateImport) "Return to expenses" else "Cancel") }
+        Button(onClick = vm::saveExpense, enabled = !state.committing && !state.readingImage && !state.addingCategory && !state.duplicateImport && state.deletingId == null, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("save-expense")) {
+            if (state.saving) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text("Saving…")
+            } else Text("Save expense")
+        }
     }
 }
 
@@ -225,53 +229,13 @@ private fun CategoryField(state: ExpenseUiState, vm: ExpenseViewModel) {
 }
 
 @Composable
-private fun EntryField(label: String, value: String, onValueChange: (String) -> Unit, error: String?, keyboard: KeyboardType = KeyboardType.Text, tag: String, prefix: String? = null, supporting: String? = null) {
+private fun EntryField(label: String, value: String, onValueChange: (String) -> Unit, error: String?, keyboard: KeyboardType = KeyboardType.Text, tag: String, prefix: String? = null, supporting: String? = null, enabled: Boolean = true) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         OutlinedTextField(
             value = value, onValueChange = onValueChange, label = { Text(label) }, modifier = Modifier.fillMaxWidth().testTag(tag),
-            isError = error != null, singleLine = true, prefix = prefix?.let { { Text(it) } },
+            isError = error != null, singleLine = true, prefix = prefix?.let { { Text(it) } }, enabled = enabled,
             keyboardOptions = KeyboardOptions(keyboardType = keyboard),
             supportingText = { if (error != null) Text(error, modifier = Modifier.semantics { contentDescription = error }) else if (supporting != null) Text(supporting) },
         )
-    }
-}
-
-@Composable
-private fun Review(state: ExpenseUiState, vm: ExpenseViewModel) {
-    val draft = state.draft
-    val imported = state.importedDraft
-    if (draft == null && imported == null) return
-    Text("Review expense", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.testTag("review-title"))
-    Text("Check the details before saving. This will only be saved after you confirm.")
-    Card(Modifier.fillMaxWidth().testTag("review-details")) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            ReviewValue("Merchant", draft?.merchant ?: imported!!.merchant)
-            ReviewValue("Amount", formatInr(draft?.amountPaise ?: imported!!.amountPaise))
-            ReviewValue("Date and time", ExpenseDateTimeFormat.format(draft?.dateTime ?: imported!!.dateTime))
-            ReviewValue("Category", draft?.category ?: imported!!.category)
-            imported?.let {
-                ReviewValue("Original image identity", it.imageHash)
-                it.transactionId?.let { transactionId -> ReviewValue("Transaction ID", transactionId) }
-            }
-        }
-    }
-    state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("recoverable-error")) }
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        OutlinedButton(onClick = vm::cancelEditor, enabled = !state.saving, modifier = Modifier.weight(1f).testTag("cancel-review")) { Text("Cancel") }
-        OutlinedButton(onClick = vm::editReview, enabled = !state.saving && !state.duplicateImport, modifier = Modifier.weight(1f).testTag("edit-review")) { Text("Edit") }
-        Button(onClick = vm::confirmSave, enabled = !state.saving && !state.duplicateImport, modifier = Modifier.weight(1f).testTag("confirm-save")) {
-            if (state.saving) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Confirm save")
-        }
-    }
-    if (state.duplicateImport) {
-        TextButton(onClick = vm::cancelEditor, modifier = Modifier.testTag("return-after-duplicate")) { Text("Return to expenses") }
-    }
-}
-
-@Composable
-private fun ReviewValue(label: String, value: String) {
-    Column {
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.testTag("review-$label"))
     }
 }

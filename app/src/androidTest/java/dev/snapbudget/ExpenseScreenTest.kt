@@ -67,7 +67,7 @@ class ExpenseScreenTest {
         assertTrue("Total card should have a non-zero visual surface", totalBounds.width > 0f && totalBounds.height > 0f)
         compose.onNodeWithTag("add-expense").performClick()
         compose.onNodeWithTag("amount-input").performTextInput("12.345")
-        compose.onNodeWithTag("review-expense").performClick()
+        compose.onNodeWithTag("save-expense").performClick()
         compose.onNodeWithText("Enter an amount greater than ₹0, with up to two decimal places.").assertExists()
         assertEquals(0, repository.insertCalls)
     }
@@ -144,23 +144,18 @@ class ExpenseScreenTest {
         assertTrue(model.state.value.categoryOptions.none { it == "" })
     }
 
-    @Test fun reviewAndCancelNeverWriteThenConfirmedSaveUpdatesListAndExplicitDelete() {
+    @Test fun directSaveWritesOnlyOnTapAndSupportsExplicitDelete() {
         val repository = FixtureRepository()
         launch(repository)
         compose.onNodeWithTag("add-expense").performClick()
         fillValidForm()
-        compose.onNodeWithTag("review-expense").performClick()
-        compose.onNodeWithTag("review-title").assertExists()
-        compose.onNodeWithTag("review-Merchant").assertTextContains("Synthetic Cafe")
-        assertEquals("Review is not a storage operation", 0, repository.insertCalls)
-        compose.onNodeWithTag("cancel-review").performClick()
-        compose.onNodeWithTag("empty-state").assertExists()
-        assertEquals(0, repository.insertCalls)
-
+        compose.onNodeWithTag("cancel-entry").performScrollTo().performClick()
+        assertEquals("Cancel leaves a draft unsaved", 0, repository.insertCalls)
         compose.onNodeWithTag("add-expense").performClick()
         fillValidForm()
-        compose.onNodeWithTag("review-expense").performClick()
-        compose.onNodeWithTag("confirm-save").performClick()
+        assertEquals(0, repository.insertCalls)
+        compose.onNodeWithTag("save-expense").performScrollTo().assertTextContains("Save expense")
+            .performClick()
         compose.waitForIdle()
         compose.onNodeWithTag("expense-1").assertExists()
         compose.onNodeWithTag("expense-total").assertTextContains("₹125.50")
@@ -175,13 +170,9 @@ class ExpenseScreenTest {
         compose.onNodeWithTag("empty-state").assertExists()
         assertEquals(1, repository.deleteCalls)
     }
-
-    @Test fun readableDateInputValidatesReviewsAndStoresCanonicalTimeOnlyAfterConfirmation() {
+    @Test fun readableDateInputValidatesAndSavesCanonicalTimeOnExplicitTap() {
         val repository = FixtureRepository()
-        val saved = SavedStateHandle(mapOf(
-            "page" to "EDIT", "merchant" to "", "amount" to "", "category" to "Other",
-            "dateTime" to "2025-05-03T21:41",
-        ))
+        val saved = SavedStateHandle(mapOf("page" to "EDIT", "merchant" to "", "amount" to "", "category" to "Other", "dateTime" to "2025-05-03T21:41"))
         val model = ExpenseViewModel(repository, saved)
         compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
         compose.onNodeWithTag("merchant-input").performTextInput("Synthetic Cafe")
@@ -193,82 +184,64 @@ class ExpenseScreenTest {
         assertTrue(dateBounds.width > 0f && dateBounds.height > 0f)
         assertTrue(dateBounds.left >= rootBounds.left && dateBounds.right <= rootBounds.right)
         assertTrue(dateBounds.top >= rootBounds.top && dateBounds.bottom <= rootBounds.bottom)
-        dateField.assert(
-            SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("3 May 2025, 9:41 PM")),
-        )
-        dateField.performTextClearance()
-        dateField.performTextInput("3 May 2025, ")
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
-        compose.onNodeWithText("Enter a valid date and time, for example 3 May 2025, 9:41 PM.").performScrollTo().assertExists()
-        assertEquals(0, repository.insertCalls)
-
+        dateField.assert(SemanticsMatcher.expectValue(
+            SemanticsProperties.EditableText,
+            AnnotatedString("3 May 2025, 9:41 PM"),
+        ))
         dateField.performTextClearance()
         dateField.performTextInput("31 Feb 2025, 9:41 PM")
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.onNodeWithText("Enter a valid date and time, for example 3 May 2025, 9:41 PM.").performScrollTo().assertExists()
         assertEquals(0, repository.insertCalls)
-
+        dateField.performTextClearance()
+        dateField.performTextInput("29 Feb 2025, 9:41 PM")
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
+        compose.onNodeWithText("Enter a valid date and time, for example 3 May 2025, 9:41 PM.").performScrollTo().assertExists()
+        assertEquals(0, repository.insertCalls)
         dateField.performTextClearance()
         dateField.performTextInput("3 May 2025, 9:41 PM")
         assertEquals("2025-05-03T21:41", saved.get<String>("dateTime"))
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
-        compose.onNodeWithTag("review-Date and time").performScrollTo().assertTextEquals("3 May 2025, 9:41 PM")
         assertEquals(0, repository.insertCalls)
-        compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.waitForIdle()
         assertEquals(1, repository.insertCalls)
         assertEquals(LocalDateTime.of(2025, 5, 3, 21, 41), repository.savedDateTimes.single())
         compose.onNodeWithTag("expense-1").performScrollTo().assertExists()
         compose.onNodeWithText("Other · 3 May 2025, 9:41 PM").performScrollTo().assertExists()
     }
-
-    @Test fun imageImportRequiresExplicitReviewAndKeepsIdentityAcrossCorrections() {
+    @Test fun importedPrefillIsEditableAndSaveKeepsIdentityWithoutDisplayingHash() {
         val repository = FixtureRepository()
         val hash = "a".repeat(64)
         val reader = object : ReceiptImageReader {
-            override suspend fun read(selection: ReceiptImageSelection) = ReceiptImageReadResult.Ready(
-                ReceiptImagePreview(null, "Synthetic Cafe", null, hash, "T12345678901234567"),
-            )
+            override suspend fun read(selection: ReceiptImageSelection) = ReceiptImageReadResult.Ready(ReceiptImagePreview(null, "Synthetic Cafe", null, hash, "T12345678901234567"))
         }
         val model = ExpenseViewModel(repository, receiptImageReader = reader, importedExpenseRepository = repository)
         compose.setContent { SnapBudgetTheme { ExpenseScreen(model, onChooseTransactionImage = { model.openImageImport() }) } }
         compose.onNodeWithTag("add-expense").performClick()
-        fillValidForm()
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
-        compose.onNodeWithTag("edit-review").performScrollTo().performClick()
         compose.onNodeWithTag("choose-transaction-image").performScrollTo().performClick()
         model.onTransactionImageSelected(ReceiptImageSelection("fixture"))
         compose.waitForIdle()
-        compose.onNodeWithTag("merchant-input").performScrollTo().assertTextContains("Synthetic Cafe")
         compose.onNodeWithTag("transaction-identity").performScrollTo().assertTextEquals("Transaction ID: T12345678901234567")
-        compose.onNodeWithTag("category-input").performScrollTo().performClick()
-        compose.onNodeWithTag("category-option-Food").performClick()
-        assertEquals("Reading or reviewing does not write", 0, repository.importCalls)
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
+        compose.onNodeWithText(hash).assertDoesNotExist()
+        assertEquals(0, repository.importCalls)
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.onNodeWithText("Enter an amount greater than ₹0, with up to two decimal places.").performScrollTo().assertExists()
+        compose.onNodeWithTag("amount-input").performScrollTo().performTextInput("13.37")
+        compose.onNodeWithTag("datetime-input").performScrollTo().performTextInput("3 May 2025, 9:41 PM")
         compose.onNodeWithTag("merchant-input").performScrollTo().performTextClearance()
         compose.onNodeWithTag("merchant-input").performTextInput("Corrected Cafe")
-        compose.onNodeWithTag("amount-input").performScrollTo().performTextClearance()
-        compose.onNodeWithTag("amount-input").performTextInput("13.37")
-        compose.onNodeWithTag("datetime-input").performScrollTo().performTextClearance()
-        compose.onNodeWithTag("datetime-input").performTextInput("3 May 2025, 9:41 PM")
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
-        compose.onNodeWithTag("review-title").performScrollTo().assertExists()
-        compose.onNodeWithTag("review-Merchant").performScrollTo().assertTextContains("Corrected Cafe")
-        compose.onNodeWithTag("review-Amount").performScrollTo().assertTextContains("₹13.37")
-        compose.onNodeWithTag("review-Category").performScrollTo().assertTextEquals("Food")
-        compose.onNodeWithTag("review-Transaction ID").performScrollTo().assertTextContains("T12345678901234567")
-        compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
+        compose.onNodeWithTag("category-input").performScrollTo().performClick()
+        compose.onNodeWithTag("category-option-Food").performClick()
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.waitForIdle()
-        assertEquals("Manual draft from earlier review must not be saved", 0, repository.insertCalls)
         assertEquals(1, repository.importCalls)
         assertEquals(1337L, repository.importedDrafts.single().amountPaise)
         assertEquals("Corrected Cafe", repository.importedDrafts.single().merchant)
         assertEquals(hash, repository.importedDrafts.single().imageHash)
         assertEquals("T12345678901234567", repository.importedDrafts.single().transactionId)
+        assertEquals(LocalDateTime.of(2025, 5, 3, 21, 41), repository.importedDrafts.single().dateTime)
         assertEquals("Food", repository.importedDrafts.single().category)
     }
-
     @Test fun categoryLoadAndWriteFailuresCanBeRetriedWithoutSelectingUnsavedCategory() {
         val categories = FixtureCategoryRepository(failFirstLoad = true, failFirstAdd = true)
         val model = ExpenseViewModel(FixtureRepository(), categoryRepository = categories)
@@ -308,12 +281,15 @@ class ExpenseScreenTest {
         assertEquals(0, repository.importCalls)
     }
 
-    @Test fun syntheticRecognizedAmountPrefillsReviewAndSavesOnlyAfterConfirmation() {
+    @Test fun syntheticRecognizedAmountPrefillsEditorAndWaitsForSaveTap() {
         val repository = FixtureRepository()
         val hash = "f".repeat(64)
         val reader = object : ReceiptImageReader {
             override suspend fun read(selection: ReceiptImageSelection) = ReceiptImageReadResult.Ready(
-                ReceiptImagePreview(24_568, "Synthetic Bakery", LocalDateTime.of(2025, 5, 3, 21, 41), hash, "T987654321098765432"),
+                ReceiptImagePreview(
+                    24_568, "Synthetic Bakery", LocalDateTime.of(2025, 5, 3, 21, 41),
+                    hash, "T987654321098765432",
+                ),
             )
         }
         val model = ExpenseViewModel(repository, receiptImageReader = reader, importedExpenseRepository = repository)
@@ -322,28 +298,21 @@ class ExpenseScreenTest {
         compose.onNodeWithTag("choose-transaction-image").performScrollTo().performClick()
         model.onTransactionImageSelected(ReceiptImageSelection("synthetic-layout-fixture"))
         compose.waitForIdle()
-
-        compose.onNodeWithTag("amount-input").performScrollTo().assert(
-            SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("245.68")),
-        )
+        compose.onNodeWithTag("amount-input").performScrollTo().assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("245.68")))
+        compose.onNodeWithText(hash).assertDoesNotExist()
         assertEquals(0, repository.importCalls)
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
-        compose.onNodeWithTag("review-Amount").performScrollTo().assertTextContains("₹245.68")
-        assertEquals("Prefill and review are not storage operations", 0, repository.importCalls)
-
-        compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.waitForIdle()
         assertEquals(1, repository.importCalls)
         assertEquals(24_568L, repository.importedDrafts.single().amountPaise)
         assertEquals(hash, repository.importedDrafts.single().imageHash)
     }
-
     @Test fun failedImportCanRetryWithoutChangingOriginalIdentity() {
         val repository = FixtureRepository().apply { importResult = AddExpenseResult.Failed }
         val hash = "b".repeat(64)
         val reader = object : ReceiptImageReader {
             override suspend fun read(selection: ReceiptImageSelection) = ReceiptImageReadResult.Ready(
-                ReceiptImagePreview(2500, "Synthetic Shop", java.time.LocalDateTime.of(2025, 4, 1, 12, 0), hash, null),
+                ReceiptImagePreview(2500, "Synthetic Shop", LocalDateTime.of(2025, 4, 1, 12, 0), hash, null),
             )
         }
         val model = ExpenseViewModel(repository, receiptImageReader = reader, importedExpenseRepository = repository)
@@ -352,17 +321,20 @@ class ExpenseScreenTest {
         compose.onNodeWithTag("choose-transaction-image").performScrollTo().performClick()
         model.onTransactionImageSelected(ReceiptImageSelection("fixture"))
         compose.waitForIdle()
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
-        compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.waitForIdle()
         compose.onNodeWithTag("recoverable-error").assertTextEquals("Expense could not be saved. Retry to try again.")
-        compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
+        assertEquals("Synthetic Shop", model.state.value.merchant)
+        assertEquals(hash, model.state.value.sourceImageHash)
+        assertEquals(null, model.state.value.sourceTransactionId)
+        repository.importResult = AddExpenseResult.Inserted(9)
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.waitForIdle()
         assertEquals(2, repository.importCalls)
         assertEquals(listOf(hash, hash), repository.importedDrafts.map { it.imageHash })
+        compose.onNodeWithTag("expense-2").assertExists()
     }
-
-    @Test fun duplicateImportOffersReturnAndDoesNotAllowRetry() {
+    @Test fun duplicateImportOffersReturnAndBlocksSecondSave() {
         val repository = FixtureRepository().apply { importResult = AddExpenseResult.Duplicate }
         val hash = "c".repeat(64)
         val reader = object : ReceiptImageReader {
@@ -375,31 +347,31 @@ class ExpenseScreenTest {
         compose.onNodeWithTag("choose-image-list").performScrollTo().performClick()
         model.onTransactionImageSelected(ReceiptImageSelection("fixture"))
         compose.waitForIdle()
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
-        compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.waitForIdle()
         compose.onNodeWithTag("recoverable-error").assertTextEquals("This receipt was already imported. No second expense was created.")
-        compose.onNodeWithTag("confirm-save").assertIsNotEnabled()
+        compose.onNodeWithTag("save-expense").assertIsNotEnabled()
         compose.onNodeWithTag("return-after-duplicate").performScrollTo().performClick()
         compose.onNodeWithTag("empty-state").assertExists()
         assertEquals(1, repository.importCalls)
     }
-
-    @Test fun duplicateConfirmTapIsBlockedWhileSaveIsInProgress() {
+    @Test fun rapidSaveTapIsBlockedWhileWriteIsInProgress() {
         val repository = FixtureRepository()
         launch(repository)
         compose.onNodeWithTag("add-expense").performClick()
         fillValidForm()
-        compose.onNodeWithTag("review-expense").performClick()
         repository.insertGate = CompletableDeferred()
-        compose.onNodeWithTag("confirm-save").performClick()
-        compose.onNodeWithTag("confirm-save").assertIsNotEnabled()
-        compose.onNodeWithTag("confirm-save").performClick()
+        compose.onNodeWithTag("save-expense").performClick()
+        compose.onNodeWithTag("save-expense").assertIsNotEnabled().assertTextEquals("Saving…")
+        compose.onNodeWithTag("merchant-input").assertIsNotEnabled()
+        compose.onNodeWithTag("amount-input").assertIsNotEnabled()
+        compose.onNodeWithTag("datetime-input").assertIsNotEnabled()
+        compose.onNodeWithTag("cancel-entry").assertIsNotEnabled()
+        compose.onNodeWithTag("save-expense").performClick()
         repository.insertGate!!.complete(Unit)
         compose.waitForIdle()
         assertEquals(1, repository.insertCalls)
     }
-
     @Test fun readyImportFromListRestoresEditorAndSourceIdentity() {
         val repository = FixtureRepository()
         val hash = "d".repeat(64)
@@ -441,21 +413,41 @@ class ExpenseScreenTest {
         assertEquals(0, repository.importCalls)
     }
 
-    @Test fun restoredReviewRetainsTheSameDraftOperationIdentity() {
+    @Test fun legacyReviewStateMigratesToEditorWithStableTokenAndNoAutomaticWrite() {
         val repository = FixtureRepository()
-        val saved = SavedStateHandle(mapOf(
-            "page" to "REVIEW", "merchant" to "Synthetic Cafe", "amount" to "125.50",
-            "dateTime" to "2025-05-03T21:41", "category" to "Food", "operationToken" to "manual:stable-token",
-        ))
+        val saved = SavedStateHandle(mapOf("page" to "REVIEW", "merchant" to "Synthetic Cafe", "amount" to "125.50", "dateTime" to "2025-05-03T21:41", "category" to "Food", "operationToken" to "manual:stable-token"))
         val model = ExpenseViewModel(repository, saved)
         compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
-        compose.onNodeWithTag("review-title").assertExists()
-        compose.onNodeWithTag("review-Date and time").assertTextEquals("3 May 2025, 9:41 PM")
-        compose.onNodeWithTag("confirm-save").performClick()
+        compose.onNodeWithTag("merchant-input").assertExists()
+        compose.onNodeWithTag("save-expense").assertExists()
+        compose.onNodeWithTag("review-title").assertDoesNotExist()
+        assertEquals(0, repository.insertCalls)
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.waitForIdle()
         assertEquals(listOf("manual:stable-token"), repository.tokens)
     }
 
+    @Test fun legacyReviewImportMigratesWithHashAndTransactionIdentityWithoutWriting() {
+        val repository = FixtureRepository()
+        val hash = "9".repeat(64)
+        val saved = SavedStateHandle(mapOf(
+            "page" to "REVIEW", "merchant" to "Synthetic Shop", "amount" to "45.67",
+            "dateTime" to "2025-06-01T09:30", "category" to "Food",
+            "importImageHash" to hash, "importTransactionId" to "T12345678901234567",
+        ))
+        val model = ExpenseViewModel(repository, saved, importedExpenseRepository = repository)
+        compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
+        compose.onNodeWithTag("merchant-input").assertExists()
+        compose.onNodeWithTag("transaction-identity").assertTextEquals("Transaction ID: T12345678901234567")
+        compose.onNodeWithText(hash).assertDoesNotExist()
+        assertEquals(ExpensePage.EDIT, model.state.value.page)
+        assertEquals(0, repository.importCalls)
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
+        compose.waitForIdle()
+        assertEquals(1, repository.importCalls)
+        assertEquals(hash, repository.importedDrafts.single().imageHash)
+        assertEquals("T12345678901234567", repository.importedDrafts.single().transactionId)
+    }
     @Test fun legacyCanonicalSavedStateRestoresAsReadableEditableDateAndKeepsImportIdentity() {
         val repository = FixtureRepository()
         val saved = SavedStateHandle(mapOf(

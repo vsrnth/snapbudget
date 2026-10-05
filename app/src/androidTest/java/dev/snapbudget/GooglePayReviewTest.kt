@@ -7,11 +7,14 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import dev.snapbudget.application.ReceiptImagePreview
 import dev.snapbudget.application.ReceiptImageReadResult
@@ -39,12 +42,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
-/** Confirms Google Pay factory output stays a review suggestion until explicit user confirmation. */
+/** Confirms Google Pay factory output stays an editable suggestion until the user taps Save expense. */
 class GooglePayReviewTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun factoryPreviewPrefillsReviewAndRequiresConfirmationWithStableDuplicateIdentity() {
+    fun factoryPreviewPrefillsEditorAndDirectSaveKeepsStableDuplicateIdentity() {
         val repository = FixtureRepository()
         val layout = ReceiptTextLayout(
             "Google Pay\nPayment of INR 123.45 completed\nCompleted\n3 May 2025, 8:22am\n" +
@@ -87,26 +90,22 @@ class GooglePayReviewTest {
         )
         compose.onNodeWithTag("transaction-identity").performScrollTo()
             .assertTextEquals("Transaction ID: GPAY:UPI:123456789012")
-        assertEquals("Import review must not write", 0, repository.importCalls)
+        assertEquals("OCR prefill must not write", 0, repository.importCalls)
 
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
-        compose.onNodeWithTag("review-Merchant").performScrollTo().assertTextContains("Synthetic Shop")
-        compose.onNodeWithTag("review-Amount").performScrollTo().assertTextContains("₹123.45")
-        compose.onNodeWithTag("review-Date and time").performScrollTo().assertTextContains("3 May 2025, 8:22 AM")
-        compose.onNodeWithTag("review-Transaction ID").performScrollTo()
-            .assertTextContains("GPAY:UPI:123456789012")
+        compose.onNodeWithText(hash).assertDoesNotExist()
+        compose.onNodeWithTag("merchant-input").assertTextContains("Synthetic Shop")
         val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
-        compose.onNodeWithTag("review-title").performScrollTo()
-        val title = compose.onNodeWithTag("review-title").fetchSemanticsNode().boundsInRoot
-        compose.onNodeWithTag("confirm-save").performScrollTo()
-        val confirm = compose.onNodeWithTag("confirm-save").fetchSemanticsNode().boundsInRoot
-        assertTrue(title.width > 0f && title.height > 0f)
-        assertTrue(confirm.width > 0f && confirm.height > 0f)
-        assertTrue(title.left >= root.left && title.right <= root.right && title.top >= root.top)
-        assertTrue(confirm.left >= root.left && confirm.right <= root.right && confirm.bottom <= root.bottom)
+        val save = compose.onNodeWithTag("save-expense").performScrollTo().assertIsDisplayed().assertTextContains("Save expense")
+        val saveBounds = save.fetchSemanticsNode().boundsInRoot
+        assertTrue(saveBounds.width > 0f && saveBounds.height >= 48f * compose.density.density)
+        assertTrue(saveBounds.left >= root.left && saveBounds.right <= root.right && saveBounds.bottom <= root.bottom)
+        val saveImage = save.captureToImage()
+        val savePixels = saveImage.toPixelMap()
+        assertTrue(saveImage.width > 0 && saveImage.height > 0)
+        assertTrue("Save action has visible rendered content", (0 until saveImage.width).any { x -> (0 until saveImage.height).any { y -> savePixels[x, y] != savePixels[0, 0] } })
         assertEquals(0, repository.importCalls)
 
-        compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
+        save.performClick()
         compose.waitForIdle()
         assertEquals(1, repository.importCalls)
         assertEquals(12_345L, repository.importedDrafts.single().amountPaise)
@@ -119,8 +118,7 @@ class GooglePayReviewTest {
         model.openImageImport()
         model.onTransactionImageSelected(ReceiptImageSelection("same-synthetic-gpay-fixture"))
         compose.waitForIdle()
-        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
-        compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
+        compose.onNodeWithTag("save-expense").performScrollTo().performClick()
         compose.waitForIdle()
         compose.onNodeWithText("This receipt was already imported. No second expense was created.")
             .performScrollTo().assertExists()
