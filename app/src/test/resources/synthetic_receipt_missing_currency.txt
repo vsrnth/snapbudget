@@ -1,0 +1,8 @@
+PhonePe
+Transaction Successful
+Paid to
+Synthetic Market
+Amount
+345.67
+9:41 PM on 03 MAY 2025
+Transaction ID: T987654321098765432

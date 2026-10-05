@@ -66,8 +66,7 @@ class ReceiptOcrTest {
                     assertEquals(12_550L, stored.amountPaise)
                     assertEquals("Synthetic Cafe", stored.merchant)
                     assertEquals("T123456789012345678", stored.transactionId)
-                    // This final contract assertion intentionally reports the known parser date bug.
-                    assertNotNull("Parsed receipt date missing; see docs/testing.md", parsed.dateTime)
+                    assertNotNull("Parsed receipt date missing", parsed.dateTime)
                     assertEquals("2025-05-03T21:41", stored.dateTime)
                 } finally {
                     database.close()
@@ -81,18 +80,42 @@ class ReceiptOcrTest {
         }
     }
 
-    private fun syntheticReceiptBitmap(): Bitmap {
-        val bitmap = Bitmap.createBitmap(1200, 900, Bitmap.Config.ARGB_8888)
+    @Test fun bundledOcrParsesExplicitSyntheticAmountWithoutCurrencyMarker() {
+        val bitmap = syntheticReceiptBitmap(listOf(
+            "PhonePe", "Transaction Successful", "Paid to", "Synthetic Bakery", "Amount",
+            "234.56", "9:41 PM on 03 MAY 2025", "Transaction ID: T987654321098765432",
+        ))
+        val result = AtomicReference<String?>()
+        val failure = AtomicReference<Exception?>()
+        val latch = CountDownLatch(1)
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        try {
+            recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                .addOnSuccessListener { result.set(it.text); latch.countDown() }
+                .addOnFailureListener { failure.set(it); latch.countDown() }
+            assertTrue("Bundled ML Kit OCR exceeded 20 seconds", latch.await(20, TimeUnit.SECONDS))
+            failure.get()?.let { throw AssertionError("Bundled OCR failed", it) }
+            val parsed = ReceiptParser.parse(result.get().orEmpty())
+            assertEquals(23_456L, parsed.amountPaise)
+            assertTrue(parsed.eligible)
+        } finally {
+            recognizer.close()
+            bitmap.recycle()
+        }
+    }
+
+    private fun syntheticReceiptBitmap(lines: List<String> = listOf(
+        "PhonePe", "Transaction Successful", "Paid to", "Synthetic Cafe", "INR 125.50",
+        "9:41 PM on 03 MAY 2025", "Transaction ID: T123456789012345678",
+    )): Bitmap {
+        val bitmap = Bitmap.createBitmap(1200, 1100, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap).apply { drawColor(Color.WHITE) }
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
             textSize = 48f
             typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL)
         }
-        listOf(
-            "PhonePe", "Transaction Successful", "Paid to", "Synthetic Cafe", "INR 125.50",
-            "9:41 PM on 03 MAY 2025", "Transaction ID: T123456789012345678",
-        ).forEachIndexed { index, line -> canvas.drawText(line, 45f, 100f + index * 105f, paint) }
+        lines.forEachIndexed { index, line -> canvas.drawText(line, 45f, 100f + index * 105f, paint) }
         return bitmap
     }
 }
