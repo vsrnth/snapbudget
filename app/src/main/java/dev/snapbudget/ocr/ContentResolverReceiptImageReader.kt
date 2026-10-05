@@ -26,6 +26,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.ensureActive
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -38,6 +39,7 @@ import kotlin.coroutines.resume
 class ContentResolverReceiptImageReader internal constructor(
     private val mimeType: (Uri) -> String?,
     private val openStream: (Uri) -> java.io.InputStream?,
+    private val recognizeForTest: (suspend (Bitmap, () -> Unit) -> ReceiptTextLayout)? = null,
 ) : ReceiptImageReader {
     constructor(context: Context) : this(
         context.applicationContext.contentResolver::getType,
@@ -58,22 +60,41 @@ class ContentResolverReceiptImageReader internal constructor(
                 val bytes = readBounded(uri) ?: return@withContext ReceiptImageReadResult.Unsupported
                 val dimensions = decodeBounds(bytes)
                     ?: return@withContext ReceiptImageReadResult.Unreadable
-                val bitmap = decodeSampled(bytes, dimensions.first, dimensions.second)
-                    ?: return@withContext ReceiptImageReadResult.Unreadable
+                val bitmap = decodeSampled(
+                    bytes,
+                    dimensions.first,
+                    dimensions.second,
+                    MAX_DECODED_SIDE,
+                    MAX_DECODED_PIXELS,
+                ) ?: return@withContext ReceiptImageReadResult.Unreadable
                 val oriented = try {
                     orient(bitmap, bytes)
                 } catch (failure: Exception) {
                     bitmap.recycle()
                     throw failure
                 }
-                val recognized = withTimeout(OCR_TIMEOUT_MILLIS) {
-                    recognize(oriented) { recyclePair(oriented, bitmap) }
+                val initialResolution = oriented.width.toLong() * oriented.height
+                val ocrStartedAt = System.nanoTime()
+                val firstLayout = withTimeout(OCR_TIMEOUT_MILLIS) {
+                    performRecognition(oriented) { recyclePair(oriented, bitmap) }
                 }
-                val parsed = ReceiptParser.parse(recognized)
-                if (!parsed.eligible || !recognized.text.contains("PhonePe", ignoreCase = true)) {
+                val initialParsed = ReceiptParser.parse(firstLayout)
+                if (!initialParsed.eligible || !firstLayout.text.contains("PhonePe", ignoreCase = true)) {
                     ReceiptImageReadResult.Unsupported
                 } else {
-                    ReceiptImageReadResult.Ready(parsed.toPreview(sha256(bytes)))
+                    val selected = if (initialParsed.amountPaise != null) {
+                        initialParsed
+                    } else {
+                        parseHigherResolutionIfAvailable(
+                            bytes = bytes,
+                            sourceWidth = dimensions.first,
+                            sourceHeight = dimensions.second,
+                            initialResolution = initialResolution,
+                            initialParsed = initialParsed,
+                            ocrStartedAtNanos = ocrStartedAt,
+                        ) ?: initialParsed
+                    }
+                    ReceiptImageReadResult.Ready(selected.toPreview(sha256(bytes)))
                 }
             }
         } catch (timeout: TimeoutCancellationException) {
@@ -129,6 +150,9 @@ class ContentResolverReceiptImageReader internal constructor(
         return ReceiptTextLayout(text, blocks)
     }
 
+    private suspend fun performRecognition(bitmap: Bitmap, onFinished: () -> Unit): ReceiptTextLayout =
+        recognizeForTest?.invoke(bitmap, onFinished) ?: recognize(bitmap, onFinished)
+
     private suspend fun recognize(bitmap: Bitmap, onFinished: () -> Unit): ReceiptTextLayout {
         val recognizer = try {
             TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -180,6 +204,57 @@ class ContentResolverReceiptImageReader internal constructor(
         transactionId = transactionId,
     )
 
+    private suspend fun parseHigherResolutionIfAvailable(
+        bytes: ByteArray,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        initialResolution: Long,
+        initialParsed: Receipt,
+        ocrStartedAtNanos: Long,
+    ): Receipt? {
+        val elapsedMillis = (System.nanoTime() - ocrStartedAtNanos) / NANOS_PER_MILLI
+        val remainingMillis = OCR_TIMEOUT_MILLIS - elapsedMillis
+        if (remainingMillis <= 0) return null
+        return try {
+            withTimeoutOrNull(remainingMillis) {
+                val decoded = decodeSampled(
+                    bytes,
+                    sourceWidth,
+                    sourceHeight,
+                    DETAIL_MAX_DECODED_SIDE,
+                    DETAIL_MAX_DECODED_PIXELS,
+                ) ?: return@withTimeoutOrNull null
+                if (decoded.width.toLong() * decoded.height <= initialResolution) {
+                    decoded.recycle()
+                    return@withTimeoutOrNull null
+                }
+                val oriented = try {
+                    orient(decoded, bytes)
+                } catch (failure: Exception) {
+                    decoded.recycle()
+                    throw failure
+                }
+                if (oriented.width.toLong() * oriented.height <= initialResolution) {
+                    recyclePair(oriented, decoded)
+                    return@withTimeoutOrNull null
+                }
+                val detailedLayout = performRecognition(oriented) { recyclePair(oriented, decoded) }
+                val detailed = ReceiptParser.parse(detailedLayout)
+                if (!detailed.eligible || !detailedLayout.text.contains("PhonePe", ignoreCase = true) ||
+                    detailed.amountPaise == null
+                ) return@withTimeoutOrNull null
+                val initialId = initialParsed.transactionId
+                val detailedId = detailed.transactionId
+                if (initialId != null && detailedId != null && initialId != detailedId) null
+                else initialParsed.copy(amountPaise = detailed.amountPaise)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun decodeBounds(bytes: ByteArray): Pair<Int, Int>? {
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeStream(ByteArrayInputStream(bytes), null, options)
@@ -191,11 +266,26 @@ class ContentResolverReceiptImageReader internal constructor(
         return width to height
     }
 
-    private fun decodeSampled(bytes: ByteArray, width: Int, height: Int): Bitmap? {
+    private fun decodeSampled(
+        bytes: ByteArray,
+        width: Int,
+        height: Int,
+        maxSide: Int,
+        maxPixels: Long,
+    ): Bitmap? {
         var sample = 1
-        while (width / sample > MAX_DECODED_SIDE || height / sample > MAX_DECODED_SIDE) sample *= 2
-        val options = BitmapFactory.Options().apply { inSampleSize = sample }
-        return BitmapFactory.decodeStream(ByteArrayInputStream(bytes), null, options)
+        fun sampled(value: Int) = ((value.toLong() + sample - 1) / sample).toInt()
+        while (sampled(width) > maxSide || sampled(height) > maxSide ||
+            sampled(width).toLong() * sampled(height) > maxPixels
+        ) sample *= 2
+        val bitmap = BitmapFactory.decodeStream(
+            ByteArrayInputStream(bytes), null, BitmapFactory.Options().apply { inSampleSize = sample },
+        ) ?: return null
+        if (bitmap.width > maxSide || bitmap.height > maxSide || bitmap.width.toLong() * bitmap.height > maxPixels) {
+            bitmap.recycle()
+            return null
+        }
+        return bitmap
     }
 
     private fun orient(bitmap: Bitmap, bytes: ByteArray): Bitmap {
@@ -226,6 +316,10 @@ class ContentResolverReceiptImageReader internal constructor(
     companion object {
         const val MAX_IMAGE_BYTES = 20 * 1024 * 1024
         const val MAX_DECODED_SIDE = 2048
+        internal const val DETAIL_MAX_DECODED_SIDE = 4096
+        internal const val DETAIL_MAX_DECODED_PIXELS = 8_000_000L
+        private const val MAX_DECODED_PIXELS = MAX_DECODED_SIDE.toLong() * MAX_DECODED_SIDE
+        private const val NANOS_PER_MILLI = 1_000_000L
         private const val MAX_SOURCE_DIMENSION = 12_000
         private const val MAX_SOURCE_PIXELS = 100_000_000L
         private const val OCR_TIMEOUT_MILLIS = 20_000L

@@ -5,11 +5,19 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import dev.snapbudget.ReceiptTextBlock
+import dev.snapbudget.ReceiptTextLayout
 import dev.snapbudget.application.ReceiptImageReadResult
 import dev.snapbudget.application.ReceiptImageSelection
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -67,6 +75,137 @@ class ContentResolverReceiptImageReaderTest {
         assertEquals(MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }, preview.imageHash)
     }
 
+    @Test fun retriesLargeImageAtHigherResolutionAfterSampledCandidateConflict() = runBlocking {
+        val bytes = syntheticReceiptPng(
+            lines = listOf("PhonePe", "Transaction Successful", "Paid to", "Synthetic Bakery", "Transaction Details"),
+            width = 4_200,
+            height = 3_200,
+        )
+        val resolver = SyntheticResolver(bytes, "image/png")
+        val bitmaps = mutableListOf<Bitmap>()
+        val layouts = listOf(
+            qualifiedLayout(listOf("245.68", "246.68")),
+            qualifiedLayout(listOf("245.68", "245.68"), includeDebit = true),
+        )
+        val result = resolver.reader { bitmap, onFinished ->
+            assertTrue("Prior OCR bitmap must be released before retry", bitmaps.lastOrNull()?.isRecycled != false)
+            bitmaps += bitmap
+            try { layouts[bitmaps.lastIndex] } finally { onFinished() }
+        }.read(ReceiptImageSelection("content://fixture/large"))
+
+        assertTrue(result is ReceiptImageReadResult.Ready)
+        val preview = (result as ReceiptImageReadResult.Ready).preview
+        assertEquals(24_568L, preview.amountPaise)
+        assertEquals("T987654321098765432", preview.transactionId)
+        assertEquals(MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }, preview.imageHash)
+        assertEquals(1, resolver.openCount)
+        assertEquals(2, bitmaps.size)
+        assertTrue(bitmaps.all(Bitmap::isRecycled))
+        assertTrue(bitmaps[1].width > bitmaps[0].width || bitmaps[1].height > bitmaps[0].height)
+        assertTrue(bitmaps[1].width <= ContentResolverReceiptImageReader.DETAIL_MAX_DECODED_SIDE)
+        assertTrue(bitmaps[1].height <= ContentResolverReceiptImageReader.DETAIL_MAX_DECODED_SIDE)
+        assertTrue(bitmaps[1].width.toLong() * bitmaps[1].height <= ContentResolverReceiptImageReader.DETAIL_MAX_DECODED_PIXELS)
+    }
+
+    @Test fun detailConflictRetainsNullAmount() = runBlocking {
+        val bytes = syntheticReceiptPng(width = 4_200, height = 3_200)
+        val resolver = SyntheticResolver(bytes, "image/png")
+        val layouts = listOf(
+            qualifiedLayout(emptyList(), transactionId = "T11111111111111111"),
+            qualifiedLayout(listOf("245.68", "246.68"), transactionId = "T11111111111111111"),
+        )
+        var calls = 0
+        val result = resolver.reader { _, onFinished -> try { layouts[calls++] } finally { onFinished() } }
+            .read(ReceiptImageSelection("content://fixture/conflict"))
+        assertTrue(result is ReceiptImageReadResult.Ready)
+        val preview = (result as ReceiptImageReadResult.Ready).preview
+        assertNull(preview.amountPaise)
+        assertEquals("T11111111111111111", preview.transactionId)
+        assertEquals(2, calls)
+        assertEquals(1, resolver.openCount)
+    }
+
+    @Test fun differingTransactionIdentityPreventsUsingDetailedAmount() = runBlocking {
+        val resolver = SyntheticResolver(syntheticReceiptPng(width = 4_200, height = 3_200), "image/png")
+        val layouts = listOf(
+            qualifiedLayout(emptyList(), transactionId = "T11111111111111111"),
+            qualifiedLayout(listOf("245.68"), transactionId = "T22222222222222222"),
+        )
+        var calls = 0
+        val result = resolver.reader { _, onFinished -> try { layouts[calls++] } finally { onFinished() } }
+            .read(ReceiptImageSelection("content://fixture/different-id"))
+        assertTrue(result is ReceiptImageReadResult.Ready)
+        val preview = (result as ReceiptImageReadResult.Ready).preview
+        assertNull(preview.amountPaise)
+        assertEquals("T11111111111111111", preview.transactionId)
+        assertEquals(2, calls)
+        assertEquals(1, resolver.openCount)
+    }
+
+    @Test fun retriesDoNotOccurForPresentAmountUnsupportedReceiptOrNoHigherResolution() = runBlocking {
+        val largeBytes = syntheticReceiptPng(width = 4_200, height = 3_200)
+        val presentResolver = SyntheticResolver(largeBytes, "image/png")
+        var presentCalls = 0
+        val present = presentResolver.reader { bitmap, done ->
+            presentCalls++
+            try { qualifiedLayout(listOf("245.68")) } finally { done() }
+        }.read(ReceiptImageSelection("content://fixture/present"))
+        assertTrue(present is ReceiptImageReadResult.Ready)
+        assertEquals(1, presentCalls)
+        assertEquals(1, presentResolver.openCount)
+
+        val unsupportedResolver = SyntheticResolver(largeBytes, "image/png")
+        var unsupportedCalls = 0
+        val unsupported = unsupportedResolver.reader { _, done ->
+            unsupportedCalls++
+            try { ReceiptTextLayout(
+                "PhonePe\nTransaction Failed\nPaid to\nSynthetic Bakery",
+                qualifiedLayout(emptyList()).blocks,
+            ) } finally { done() }
+        }.read(ReceiptImageSelection("content://fixture/unsupported"))
+        assertEquals(ReceiptImageReadResult.Unsupported, unsupported)
+        assertEquals(1, unsupportedCalls)
+        assertEquals(1, unsupportedResolver.openCount)
+
+        val smallResolver = SyntheticResolver(syntheticReceiptPng(), "image/png")
+        var smallCalls = 0
+        val small = smallResolver.reader { _, done ->
+            smallCalls++
+            try { qualifiedLayout(emptyList()) } finally { done() }
+        }.read(ReceiptImageSelection("content://fixture/small"))
+        assertTrue(small is ReceiptImageReadResult.Ready)
+        assertEquals(1, smallCalls)
+        assertEquals(1, smallResolver.openCount)
+    }
+
+    @Test fun cancellationDuringDetailRetryPropagatesAndReleasesRetryBitmap() = runBlocking {
+        val resolver = SyntheticResolver(syntheticReceiptPng(width = 4_200, height = 3_200), "image/png")
+        val bitmaps = mutableListOf<Bitmap>()
+        var calls = 0
+        val secondRecognitionStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val job = launch {
+            resolver.reader { bitmap, done ->
+                calls++
+                bitmaps += bitmap
+                if (calls == 1) {
+                    try { qualifiedLayout(emptyList()) } finally { done() }
+                } else {
+                    secondRecognitionStarted.complete(Unit)
+                    try { awaitCancellation() } finally { done() }
+                }
+            }.read(ReceiptImageSelection("content://fixture/cancel-retry"))
+        }
+        try {
+            withTimeout(5_000) { secondRecognitionStarted.await() }
+        } finally {
+            job.cancelAndJoin()
+        }
+        assertEquals(2, calls)
+        assertTrue(job.isCancelled)
+        assertTrue(bitmaps.all(Bitmap::isRecycled))
+        assertEquals(1, resolver.openCount)
+    }
+
     @Test fun rejectsFailedIncomingAndNonPhonePeReceiptText() = runBlocking {
         for (text in listOf(
             listOf("PhonePe", "Transaction Failed", "Paid to", "Synthetic Cafe", "INR 125.50"),
@@ -91,11 +230,15 @@ class ContentResolverReceiptImageReaderTest {
         }
     }
 
-    private fun syntheticReceiptPng(lines: List<String> = listOf(
-        "PhonePe", "Transaction Successful", "Paid to", "Synthetic Cafe", "INR 125.50",
-        "9:41 PM on 03 MAY 2025", "Transaction ID: T123456789012345678",
-    )): ByteArray {
-        val bitmap = Bitmap.createBitmap(1200, 1200, Bitmap.Config.ARGB_8888)
+    private fun syntheticReceiptPng(
+        lines: List<String> = listOf(
+            "PhonePe", "Transaction Successful", "Paid to", "Synthetic Cafe", "INR 125.50",
+            "9:41 PM on 03 MAY 2025", "Transaction ID: T123456789012345678",
+        ),
+        width: Int = 1200,
+        height: Int = 1200,
+    ): ByteArray {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         try {
             val canvas = Canvas(bitmap).apply { drawColor(Color.WHITE) }
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; textSize = 48f }
@@ -109,11 +252,48 @@ class ContentResolverReceiptImageReaderTest {
         }
     }
 
+    private fun qualifiedLayout(
+        amounts: List<String>,
+        includeDebit: Boolean = false,
+        transactionId: String = "T987654321098765432",
+    ): ReceiptTextLayout {
+        val lines = buildList {
+            add("PhonePe")
+            add("Transaction Successful")
+            add("Paid to")
+            add("Synthetic Bakery")
+            amounts.firstOrNull()?.let(::add)
+            if (includeDebit) {
+                add("Debited from")
+                add("Synthetic Wallet")
+                amounts.getOrNull(1)?.let(::add)
+            } else amounts.drop(1).forEach(::add)
+            add("Transaction Details")
+            add("Transaction ID: $transactionId")
+        }
+        val blocks = buildList {
+            add(textBlock("Paid to", 0.10f, 0.10f))
+            add(textBlock("Synthetic Bakery", 0.10f, 0.13f))
+            amounts.firstOrNull()?.let { add(textBlock(it, 0.10f, 0.16f)) }
+            if (includeDebit) {
+                add(textBlock("Debited from", 0.10f, 0.40f))
+                add(textBlock("Synthetic Wallet", 0.10f, 0.43f))
+                amounts.getOrNull(1)?.let { add(textBlock(it, 0.10f, 0.46f)) }
+            } else amounts.drop(1).forEachIndexed { index, value -> add(textBlock(value, 0.10f, 0.20f + index * 0.03f)) }
+            add(textBlock("Transaction Details", 0.10f, 0.70f))
+        }
+        return ReceiptTextLayout(lines.joinToString("\n"), blocks)
+    }
+
+    private fun textBlock(text: String, left: Float, top: Float) = ReceiptTextBlock(
+        text, left, top, left + 0.3f, top + 0.02f,
+    )
+
     private class SyntheticResolver(var bytes: ByteArray, var mime: String) {
         var openCount = 0
         var lastStreamClosed = false
 
-        fun reader() = ContentResolverReceiptImageReader(
+        fun reader(recognize: (suspend (Bitmap, () -> Unit) -> ReceiptTextLayout)? = null) = ContentResolverReceiptImageReader(
             mimeType = { mime },
             openStream = {
                 openCount++
@@ -125,6 +305,7 @@ class ContentResolverReceiptImageReaderTest {
                     }
                 }
             },
+            recognizeForTest = recognize,
         )
     }
 }
