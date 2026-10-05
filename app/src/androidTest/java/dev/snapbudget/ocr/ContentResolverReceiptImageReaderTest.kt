@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import com.google.android.gms.tasks.TaskCompletionSource
+import com.google.android.gms.tasks.Tasks
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.snapbudget.ReceiptTextBlock
 import dev.snapbudget.ReceiptTextLayout
@@ -21,6 +23,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.google.mlkit.vision.text.Text
+import com.google.mlkit.vision.text.TextRecognizer
+import java.lang.reflect.Proxy
 import java.io.ByteArrayInputStream
 import java.security.MessageDigest
 
@@ -252,6 +257,129 @@ class ContentResolverReceiptImageReaderTest {
         assertEquals(1, resolver.openCount)
     }
 
+    @Test fun nativeRecognizerIsReusedAcrossDetailRetryAndClosedOnce() = runBlocking {
+        val resolver = SyntheticResolver(syntheticReceiptPng(width = 4_200, height = 3_200), "image/png")
+        val taskCount = java.util.concurrent.atomic.AtomicInteger()
+        val factoryCount = java.util.concurrent.atomic.AtomicInteger()
+        val closeCount = java.util.concurrent.atomic.AtomicInteger()
+        val textResults = listOf(
+            "Google Pay\nPayment of INR 125.50 completed\nCompleted\nTo: Synthetic Shop",
+            "Google Pay\nPayment of INR 999.99 completed\nCompleted\n3 May 2025, 8:22am\n" +
+                "UPI transaction ID\n123456789012\nTo: Changed Shop",
+        )
+        val result = resolver.reader(recognizerFactory = {
+            factoryCount.incrementAndGet()
+            Proxy.newProxyInstance(
+                TextRecognizer::class.java.classLoader,
+                arrayOf(TextRecognizer::class.java),
+            ) { _, method, _ ->
+                when (method.name) {
+                    "process" -> Tasks.forResult(Text(
+                        textResults[taskCount.getAndIncrement()], emptyList<Text.TextBlock>(),
+                    ))
+                    "close" -> { closeCount.incrementAndGet(); null }
+                    "getOptionalFeatures" -> emptyList<Any>()
+                    else -> null
+                }
+            } as TextRecognizer
+        }).read(ReceiptImageSelection("content://fixture/shared-native-recognizer"))
+
+        assertTrue("Expected GPay metadata recovery, got $result", result is ReceiptImageReadResult.Ready)
+        val preview = (result as ReceiptImageReadResult.Ready).preview
+        assertEquals(12_550L, preview.amountPaise)
+        assertEquals("Synthetic Shop", preview.merchant)
+        assertEquals("2025-05-03T08:22", preview.dateTime.toString())
+        assertEquals("GPAY:UPI:123456789012", preview.transactionId)
+        assertEquals(2, taskCount.get())
+        assertEquals(1, factoryCount.get())
+        assertEquals(1, closeCount.get())
+    }
+
+    @Test fun nativeRecognizerIsClosedWhenProcessThrowsSynchronously() = runBlocking {
+        val resolver = SyntheticResolver(syntheticReceiptPng(), "image/png")
+        val closeCount = java.util.concurrent.atomic.AtomicInteger()
+        val result = resolver.reader(recognizerFactory = {
+            Proxy.newProxyInstance(
+                TextRecognizer::class.java.classLoader,
+                arrayOf(TextRecognizer::class.java),
+            ) { _, method, _ ->
+                when (method.name) {
+                    "process" -> throw IllegalStateException("synthetic process failure")
+                    "close" -> { closeCount.incrementAndGet(); null }
+                    "getOptionalFeatures" -> emptyList<Any>()
+                    else -> null
+                }
+            } as TextRecognizer
+        }).read(ReceiptImageSelection("content://fixture/native-process-failure"))
+
+        assertEquals(ReceiptImageReadResult.Unreadable, result)
+        assertEquals(1, closeCount.get())
+        assertTrue(resolver.lastStreamClosed)
+    }
+
+    @Test fun recognizerFactoryFailureReturnsUnreadableAndClosesInput() = runBlocking {
+        val resolver = SyntheticResolver(syntheticReceiptPng(), "image/png")
+        val result = resolver.reader(recognizerFactory = {
+            throw IllegalStateException("synthetic recognizer creation failure")
+        }).read(ReceiptImageSelection("content://fixture/native-factory-failure"))
+
+        assertEquals(ReceiptImageReadResult.Unreadable, result)
+        assertTrue(resolver.lastStreamClosed)
+    }
+
+    @Test fun cancelledNativeDetailTaskRetainsBitmapAndRecognizerUntilCallback() = runBlocking {
+        val resolver = SyntheticResolver(syntheticReceiptPng(width = 4_200, height = 3_200), "image/png")
+        val bitmaps = java.util.Collections.synchronizedList(mutableListOf<Bitmap>())
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val secondTaskStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val secondTask = TaskCompletionSource<Text>()
+        val closeCount = java.util.concurrent.atomic.AtomicInteger()
+        val reader = resolver.reader(recognizerFactory = {
+            Proxy.newProxyInstance(
+                TextRecognizer::class.java.classLoader,
+                arrayOf(TextRecognizer::class.java),
+            ) { _, method, args ->
+                when (method.name) {
+                    "process" -> {
+                        val input = args!![0] as com.google.mlkit.vision.common.InputImage
+                        // The reader owns each bitmap until its matching ML task completes.
+                        input.bitmapInternal?.let { bitmaps += it }
+                        if (calls.getAndIncrement() == 0) Tasks.forResult(Text(
+                            "PhonePe\nTransaction Successful\nPaid to\nSynthetic Cafe", emptyList<Text.TextBlock>(),
+                        )) else {
+                            secondTaskStarted.complete(Unit)
+                            secondTask.task
+                        }
+                    }
+                    "close" -> { closeCount.incrementAndGet(); null }
+                    "getOptionalFeatures" -> emptyList<Any>()
+                    else -> null
+                }
+            } as TextRecognizer
+        })
+        val job = launch { reader.read(ReceiptImageSelection("content://fixture/cancel-native-detail")) }
+        try {
+            withTimeout(5_000) { secondTaskStarted.await() }
+            job.cancelAndJoin()
+
+            assertEquals(2, bitmaps.size)
+            assertTrue(bitmaps[0].isRecycled)
+            assertTrue(!bitmaps[1].isRecycled)
+            assertEquals(0, closeCount.get())
+            secondTask.setException(IllegalStateException("synthetic OCR completion"))
+            withTimeout(5_000) {
+                while (closeCount.get() == 0) kotlinx.coroutines.delay(10)
+            }
+            assertEquals(1, closeCount.get())
+            assertTrue(bitmaps.all(Bitmap::isRecycled))
+        } finally {
+            job.cancelAndJoin()
+            if (!secondTask.task.isComplete) {
+                secondTask.trySetException(IllegalStateException("synthetic OCR cleanup"))
+            }
+        }
+    }
+
     @Test fun rejectsFailedIncomingAndNonPhonePeReceiptText() = runBlocking {
         for (text in listOf(
             listOf("PhonePe", "Transaction Failed", "Paid to", "Synthetic Cafe", "INR 125.50"),
@@ -339,7 +467,10 @@ class ContentResolverReceiptImageReaderTest {
         var openCount = 0
         var lastStreamClosed = false
 
-        fun reader(recognize: (suspend (Bitmap, () -> Unit) -> ReceiptTextLayout)? = null) = ContentResolverReceiptImageReader(
+        fun reader(
+            recognizerFactory: (() -> TextRecognizer)? = null,
+            recognize: (suspend (Bitmap, () -> Unit) -> ReceiptTextLayout)? = null,
+        ) = ContentResolverReceiptImageReader(
             mimeType = { mime },
             openStream = {
                 openCount++
@@ -352,6 +483,7 @@ class ContentResolverReceiptImageReaderTest {
                 }
             },
             recognizeForTest = recognize,
+            recognizerFactory = recognizerFactory,
         )
     }
 }

@@ -78,6 +78,15 @@ class ReceiptImageResolutionRetryTest {
         assertTrue(fixture.streamClosed)
     }
 
+    @Test
+    fun detailSamplingPlanSkipsDecodeWhenItCannotExceedInitialResolution() {
+        val fixture = FixtureImage(800, 1200)
+        val reader = fixture.reader { initialReceipt }
+
+        assertTrue(!reader.detailCanIncreaseResolution(800, 1200, 800L * 1200))
+        assertTrue(reader.detailCanIncreaseResolution(4201, 3201, 1024L * 800))
+    }
+
     private fun assertReady(result: ReceiptImageReadResult): dev.snapbudget.application.ReceiptImagePreview {
         assertTrue("Expected Ready", result is ReceiptImageReadResult.Ready)
         return (result as ReceiptImageReadResult.Ready).preview

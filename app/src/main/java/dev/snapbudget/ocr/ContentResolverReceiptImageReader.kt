@@ -41,6 +41,7 @@ class ContentResolverReceiptImageReader internal constructor(
     private val mimeType: (Uri) -> String?,
     private val openStream: (Uri) -> java.io.InputStream?,
     private val recognizeForTest: (suspend (Bitmap, () -> Unit) -> ReceiptTextLayout)? = null,
+    private val recognizerFactory: (() -> TextRecognizer)? = null,
 ) : ReceiptImageReader {
     constructor(context: Context) : this(
         context.applicationContext.contentResolver::getType,
@@ -76,29 +77,37 @@ class ContentResolverReceiptImageReader internal constructor(
                 }
                 val initialResolution = oriented.width.toLong() * oriented.height
                 val ocrStartedAt = System.nanoTime()
-                val firstLayout = withTimeout(OCR_TIMEOUT_MILLIS) {
-                    performRecognition(oriented) { recyclePair(oriented, bitmap) }
-                }
-                val selectedParser = ReceiptParserFactory.create(firstLayout)
-                    ?: return@withContext ReceiptImageReadResult.Unsupported
-                val initialParsed = selectedParser.parse(firstLayout)
-                if (!initialParsed.eligible) {
-                    ReceiptImageReadResult.Unsupported
-                } else {
-                    val selected = if (!selectedParser.needsMoreDetail(initialParsed)) {
-                        initialParsed
-                    } else {
-                        parseHigherResolutionIfAvailable(
-                            bytes = bytes,
-                            sourceWidth = dimensions.first,
-                            sourceHeight = dimensions.second,
-                            initialResolution = initialResolution,
-                            initialParsed = initialParsed,
-                            selectedParser = selectedParser,
-                            ocrStartedAtNanos = ocrStartedAt,
-                        ) ?: initialParsed
+                val recognitionSession = RecognitionSession(recognizerFactory ?: {
+                    TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                })
+                try {
+                    val firstLayout = withTimeout(OCR_TIMEOUT_MILLIS) {
+                        performRecognition(oriented, { recyclePair(oriented, bitmap) }, recognitionSession)
                     }
-                    ReceiptImageReadResult.Ready(selected.toPreview(sha256(bytes)))
+                    val selectedParser = ReceiptParserFactory.create(firstLayout)
+                        ?: return@withContext ReceiptImageReadResult.Unsupported
+                    val initialParsed = selectedParser.parse(firstLayout)
+                    if (!initialParsed.eligible) {
+                        ReceiptImageReadResult.Unsupported
+                    } else {
+                        val selected = if (!selectedParser.needsMoreDetail(initialParsed)) {
+                            initialParsed
+                        } else {
+                            parseHigherResolutionIfAvailable(
+                                bytes = bytes,
+                                sourceWidth = dimensions.first,
+                                sourceHeight = dimensions.second,
+                                initialResolution = initialResolution,
+                                initialParsed = initialParsed,
+                                selectedParser = selectedParser,
+                                ocrStartedAtNanos = ocrStartedAt,
+                                recognitionSession = recognitionSession,
+                            ) ?: initialParsed
+                        }
+                        ReceiptImageReadResult.Ready(selected.toPreview(sha256(bytes)))
+                    }
+                } finally {
+                    recognitionSession.close()
                 }
             }
         } catch (timeout: TimeoutCancellationException) {
@@ -154,44 +163,93 @@ class ContentResolverReceiptImageReader internal constructor(
         return ReceiptTextLayout(text, blocks)
     }
 
-    private suspend fun performRecognition(bitmap: Bitmap, onFinished: () -> Unit): ReceiptTextLayout =
-        recognizeForTest?.invoke(bitmap, onFinished) ?: recognize(bitmap, onFinished)
+    private suspend fun performRecognition(
+        bitmap: Bitmap,
+        onFinished: () -> Unit,
+        session: RecognitionSession,
+    ): ReceiptTextLayout = recognizeForTest?.invoke(bitmap, onFinished) ?: recognize(bitmap, onFinished, session)
 
-    private suspend fun recognize(bitmap: Bitmap, onFinished: () -> Unit): ReceiptTextLayout {
+    private suspend fun recognize(bitmap: Bitmap, onFinished: () -> Unit, session: RecognitionSession): ReceiptTextLayout {
         val recognizer = try {
-            TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+            session.recognizer()
         } catch (failure: Exception) {
             onFinished()
             throw failure
         }
-        val released = AtomicBoolean(false)
-        fun release() {
-            if (released.compareAndSet(false, true)) {
+        val taskFinished = AtomicBoolean(false)
+        fun finishTask() {
+            if (taskFinished.compareAndSet(false, true)) {
                 try {
-                    recognizer.close()
-                } finally {
                     onFinished()
+                } finally {
+                    session.taskFinished()
                 }
             }
         }
         val task = try {
+            session.taskStarted()
             recognizer.process(InputImage.fromBitmap(bitmap, 0))
         } catch (failure: Exception) {
-            release()
+            if (taskFinished.compareAndSet(false, true)) {
+                try { onFinished() } finally { session.taskFinished() }
+            }
             throw failure
         }
         return suspendCancellableCoroutine { continuation ->
             task.addOnSuccessListener { result ->
                 val layout = runCatching { result.toReceiptTextLayout(bitmap.width, bitmap.height) }
-                release()
+                finishTask()
                 if (continuation.isActive) continuation.resumeWith(layout)
             }.addOnFailureListener { failure ->
-                release()
+                finishTask()
                 if (continuation.isActive) continuation.resumeWith(Result.failure(failure))
             }.addOnCanceledListener {
-                release()
+                finishTask()
                 if (continuation.isActive) continuation.cancel()
             }
+        }
+    }
+
+    /** One recognizer belongs to one read; a timed-out ML task may still be using it. */
+    private class RecognitionSession(private val createClient: () -> TextRecognizer) {
+        private var client: TextRecognizer? = null
+        private var pendingTasks = 0
+        private var closeRequested = false
+        private var closed = false
+
+        @Synchronized
+        fun recognizer(): TextRecognizer {
+            check(!closeRequested) { "Recognition session is closed" }
+            return client ?: createClient().also { client = it }
+        }
+
+        @Synchronized
+        fun taskStarted() {
+            check(!closeRequested) { "Recognition session is closed" }
+            pendingTasks++
+        }
+
+        fun taskFinished() {
+            val toClose = synchronized(this) {
+                pendingTasks--
+                check(pendingTasks >= 0)
+                closeIfIdle()
+            }
+            toClose?.close()
+        }
+
+        fun close() {
+            val toClose = synchronized(this) {
+                closeRequested = true
+                closeIfIdle()
+            }
+            toClose?.close()
+        }
+
+        private fun closeIfIdle(): TextRecognizer? {
+            if (!closeRequested || pendingTasks != 0 || closed) return null
+            closed = true
+            return client
         }
     }
 
@@ -216,12 +274,16 @@ class ContentResolverReceiptImageReader internal constructor(
         initialParsed: Receipt,
         selectedParser: ProviderReceiptParser,
         ocrStartedAtNanos: Long,
+        recognitionSession: RecognitionSession,
     ): Receipt? {
         val elapsedMillis = (System.nanoTime() - ocrStartedAtNanos) / NANOS_PER_MILLI
         val remainingMillis = OCR_TIMEOUT_MILLIS - elapsedMillis
         if (remainingMillis <= 0) return null
         return try {
             withTimeoutOrNull(remainingMillis) {
+                if (!detailCanIncreaseResolution(sourceWidth, sourceHeight, initialResolution)) {
+                    return@withTimeoutOrNull null
+                }
                 val decoded = decodeSampled(
                     bytes,
                     sourceWidth,
@@ -243,7 +305,11 @@ class ContentResolverReceiptImageReader internal constructor(
                     recyclePair(oriented, decoded)
                     return@withTimeoutOrNull null
                 }
-                val detailedLayout = performRecognition(oriented) { recyclePair(oriented, decoded) }
+                val detailedLayout = performRecognition(
+                    oriented,
+                    { recyclePair(oriented, decoded) },
+                    recognitionSession,
+                )
                 val detailedParser = ReceiptParserFactory.create(detailedLayout)
                 if (detailedParser == null || detailedParser.provider != selectedParser.provider) {
                     return@withTimeoutOrNull null
@@ -282,11 +348,7 @@ class ContentResolverReceiptImageReader internal constructor(
         maxSide: Int,
         maxPixels: Long,
     ): Bitmap? {
-        var sample = 1
-        fun sampled(value: Int) = ((value.toLong() + sample - 1) / sample).toInt()
-        while (sampled(width) > maxSide || sampled(height) > maxSide ||
-            sampled(width).toLong() * sampled(height) > maxPixels
-        ) sample *= 2
+        val sample = sampleSizeFor(width, height, maxSide, maxPixels)
         val bitmap = BitmapFactory.decodeStream(
             ByteArrayInputStream(bytes), null, BitmapFactory.Options().apply { inSampleSize = sample },
         ) ?: return null
@@ -296,6 +358,26 @@ class ContentResolverReceiptImageReader internal constructor(
         }
         return bitmap
     }
+
+    private fun sampleSizeFor(width: Int, height: Int, maxSide: Int, maxPixels: Long): Int {
+        var sample = 1
+        while (ceilDiv(width, sample) > maxSide || ceilDiv(height, sample) > maxSide ||
+            ceilDiv(width, sample).toLong() * ceilDiv(height, sample) > maxPixels
+        ) sample *= 2
+        return sample
+    }
+
+    internal fun detailCanIncreaseResolution(sourceWidth: Int, sourceHeight: Int, initialResolution: Long): Boolean {
+        val sample = sampleSizeFor(
+            sourceWidth,
+            sourceHeight,
+            DETAIL_MAX_DECODED_SIDE,
+            DETAIL_MAX_DECODED_PIXELS,
+        )
+        return ceilDiv(sourceWidth, sample).toLong() * ceilDiv(sourceHeight, sample) > initialResolution
+    }
+
+    private fun ceilDiv(value: Int, divisor: Int) = ((value.toLong() + divisor - 1) / divisor).toInt()
 
     private fun orient(bitmap: Bitmap, bytes: ByteArray): Bitmap {
         val orientation = runCatching {
