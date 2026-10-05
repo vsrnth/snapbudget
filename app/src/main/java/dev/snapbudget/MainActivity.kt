@@ -16,8 +16,10 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.createSavedStateHandle
 import dev.snapbudget.application.ReceiptImageSelection
 import dev.snapbudget.data.RoomExpenseRepository
+import dev.snapbudget.data.SharedPreferencesCategoryRepository
 import dev.snapbudget.domain.ExpenseRepository
 import dev.snapbudget.domain.ImportedExpenseRepository
+import dev.snapbudget.domain.CategoryRepository
 import dev.snapbudget.ocr.ContentResolverReceiptImageReader
 import dev.snapbudget.ui.ExpenseScreen
 import dev.snapbudget.ui.ExpenseViewModel
@@ -39,6 +41,7 @@ internal fun expenseViewModelFactory(
     repository: ExpenseRepository,
     receiptImageReader: dev.snapbudget.application.ReceiptImageReader,
     importedExpenseRepository: ImportedExpenseRepository,
+    categoryRepository: CategoryRepository = dev.snapbudget.domain.InMemoryCategoryRepository(),
 ) = viewModelFactory {
     initializer {
         val handle = createSavedStateHandle()
@@ -47,6 +50,7 @@ internal fun expenseViewModelFactory(
             savedState = handle,
             receiptImageReader = receiptImageReader,
             importedExpenseRepository = importedExpenseRepository,
+            categoryRepository = categoryRepository,
         )
     }
 }
@@ -70,6 +74,7 @@ class MainActivity : ComponentActivity() {
             repository,
             ContentResolverReceiptImageReader(applicationContext),
             repository,
+            SharedPreferencesCategoryRepository(applicationContext),
         )
         setContent {
             SnapBudgetTheme {

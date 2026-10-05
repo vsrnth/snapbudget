@@ -6,6 +6,8 @@ import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -15,6 +17,11 @@ import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.AnnotatedString
 import androidx.lifecycle.SavedStateHandle
 import dev.snapbudget.domain.AddExpenseResult
@@ -24,6 +31,7 @@ import dev.snapbudget.domain.ExpenseRepository
 import dev.snapbudget.domain.ManualExpenseDraft
 import dev.snapbudget.domain.ImportedExpenseDraft
 import dev.snapbudget.domain.ImportedExpenseRepository
+import dev.snapbudget.domain.CategoryRepository
 import dev.snapbudget.application.ReceiptImageReader
 import dev.snapbudget.application.ReceiptImageReadResult
 import dev.snapbudget.application.ReceiptImagePreview
@@ -62,6 +70,78 @@ class ExpenseScreenTest {
         compose.onNodeWithTag("review-expense").performClick()
         compose.onNodeWithText("Enter an amount greater than ₹0, with up to two decimal places.").assertExists()
         assertEquals(0, repository.insertCalls)
+    }
+
+    @Test fun categoryDropdownIsReadOnlyAndCustomCategoriesPersistAcrossEditorCancellation() {
+        val repository = FixtureRepository()
+        val categories = FixtureCategoryRepository()
+        var model by mutableStateOf(ExpenseViewModel(repository, categoryRepository = categories))
+        compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
+        compose.waitForIdle()
+        compose.onNodeWithTag("add-expense").performClick()
+        val rootBounds = compose.onRoot().fetchSemanticsNode().boundsInWindow
+        val field = compose.onNodeWithTag("category-input").performScrollTo()
+        val config = field.fetchSemanticsNode().config
+        assertTrue("Category is selected from a menu rather than typed", !config.contains(SemanticsActions.SetText))
+        val fieldImage = field.captureToImage()
+        val fieldPixels = fieldImage.toPixelMap()
+        assertTrue(fieldImage.width > 2 && fieldImage.height > 2)
+        val surfacePixel = fieldPixels[2, 2]
+        assertTrue(fieldImage.width > 0 && fieldImage.height > 0)
+        assertTrue("Category field renders a visible outline or text", (0 until fieldImage.width).any { x -> (0 until fieldImage.height).any { y -> fieldPixels[x, y] != surfacePixel } })
+        field.performClick()
+        val addChoice = compose.onNodeWithTag("add-category-option").performScrollTo().assertIsDisplayed()
+        val bounds = addChoice.fetchSemanticsNode().boundsInWindow
+        assertTrue(bounds.width > 0f && bounds.height >= 48f * compose.density.density)
+        assertTrue(bounds.left >= rootBounds.left && bounds.right <= rootBounds.right && bounds.top >= rootBounds.top && bounds.bottom <= rootBounds.bottom)
+        compose.onNodeWithTag("category-option-Food").performClick()
+        assertEquals("Food", model.state.value.category)
+
+        compose.onNodeWithTag("category-input").performClick()
+        compose.onNodeWithTag("add-category-option").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithTag("new-category-input").performTextInput("  Coffee  ")
+        compose.onNodeWithTag("add-category-confirm").performClick()
+        compose.waitForIdle()
+        assertEquals("Coffee", model.state.value.category)
+        assertEquals(listOf("Coffee"), categories.values)
+        compose.onNodeWithTag("cancel-entry").performScrollTo().performClick()
+
+        compose.onNodeWithTag("add-expense").performClick()
+        compose.onNodeWithTag("category-input").performScrollTo().performClick()
+        compose.onNodeWithTag("category-option-Coffee").performScrollTo().assertIsDisplayed().performClick()
+        assertEquals("Coffee", model.state.value.category)
+        compose.onNodeWithTag("category-input").performClick()
+        compose.onNodeWithTag("add-category-option").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithTag("new-category-input").performTextInput("cOffEe")
+        compose.onNodeWithTag("add-category-confirm").performClick()
+        compose.waitForIdle()
+        assertEquals(listOf("Coffee"), categories.values)
+        assertEquals(1, model.state.value.categoryOptions.count { it.equals("coffee", ignoreCase = true) })
+        assertEquals("Coffee", model.state.value.category)
+        compose.onNodeWithTag("cancel-entry").performScrollTo().performClick()
+        val restarted = ExpenseViewModel(repository, categoryRepository = categories)
+        compose.runOnIdle { model = restarted }
+        compose.waitForIdle()
+        assertTrue(restarted.state.value.categoryOptions.contains("Coffee"))
+    }
+
+    @Test fun categoryAddValidationAndCancelLeaveCurrentSelectionAlone() {
+        val model = ExpenseViewModel(FixtureRepository(), categoryRepository = FixtureCategoryRepository())
+        compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
+        compose.waitForIdle()
+        compose.onNodeWithTag("add-expense").performClick()
+        val rootBounds = compose.onRoot().fetchSemanticsNode().boundsInWindow
+        compose.onNodeWithTag("category-input").performScrollTo().performClick()
+        compose.onNodeWithTag("add-category-option").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithTag("new-category-input").performTextInput("\n")
+        compose.onNodeWithTag("add-category-confirm").performClick()
+        compose.onNodeWithTag("category-error", useUnmergedTree = true).assertTextEquals("Category names cannot contain control characters.")
+        val dialogBounds = compose.onNodeWithTag("new-category-input").fetchSemanticsNode().boundsInWindow
+        assertTrue(dialogBounds.width > 0f && dialogBounds.height > 0f)
+        assertTrue(dialogBounds.left >= rootBounds.left && dialogBounds.right <= rootBounds.right && dialogBounds.top >= rootBounds.top && dialogBounds.bottom <= rootBounds.bottom)
+        compose.onNodeWithTag("add-category-cancel").performClick()
+        assertEquals("Other", model.state.value.category)
+        assertTrue(model.state.value.categoryOptions.none { it == "" })
     }
 
     @Test fun reviewAndCancelNeverWriteThenConfirmedSaveUpdatesListAndExplicitDelete() {
@@ -161,6 +241,8 @@ class ExpenseScreenTest {
         compose.waitForIdle()
         compose.onNodeWithTag("merchant-input").performScrollTo().assertTextContains("Synthetic Cafe")
         compose.onNodeWithTag("transaction-identity").performScrollTo().assertTextEquals("Transaction ID: T12345678901234567")
+        compose.onNodeWithTag("category-input").performScrollTo().performClick()
+        compose.onNodeWithTag("category-option-Food").performClick()
         assertEquals("Reading or reviewing does not write", 0, repository.importCalls)
         compose.onNodeWithTag("review-expense").performScrollTo().performClick()
         compose.onNodeWithText("Enter an amount greater than ₹0, with up to two decimal places.").performScrollTo().assertExists()
@@ -174,6 +256,7 @@ class ExpenseScreenTest {
         compose.onNodeWithTag("review-title").performScrollTo().assertExists()
         compose.onNodeWithTag("review-Merchant").performScrollTo().assertTextContains("Corrected Cafe")
         compose.onNodeWithTag("review-Amount").performScrollTo().assertTextContains("₹13.37")
+        compose.onNodeWithTag("review-Category").performScrollTo().assertTextEquals("Food")
         compose.onNodeWithTag("review-Transaction ID").performScrollTo().assertTextContains("T12345678901234567")
         compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
         compose.waitForIdle()
@@ -183,6 +266,27 @@ class ExpenseScreenTest {
         assertEquals("Corrected Cafe", repository.importedDrafts.single().merchant)
         assertEquals(hash, repository.importedDrafts.single().imageHash)
         assertEquals("T12345678901234567", repository.importedDrafts.single().transactionId)
+        assertEquals("Food", repository.importedDrafts.single().category)
+    }
+
+    @Test fun categoryLoadAndWriteFailuresCanBeRetriedWithoutSelectingUnsavedCategory() {
+        val categories = FixtureCategoryRepository(failFirstLoad = true, failFirstAdd = true)
+        val model = ExpenseViewModel(FixtureRepository(), categoryRepository = categories)
+        compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
+        compose.waitForIdle()
+        compose.onNodeWithTag("add-expense").performClick()
+        compose.onNodeWithTag("category-input").performScrollTo().performClick()
+        compose.onNodeWithTag("add-category-option").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithTag("new-category-input").performTextInput("Coffee")
+        compose.onNodeWithTag("add-category-confirm").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag("category-error", useUnmergedTree = true).assertTextEquals("Category could not be saved. Please try again.")
+        assertEquals("Other", model.state.value.category)
+        assertTrue(model.state.value.categoryCatalogLoaded)
+        compose.onNodeWithTag("add-category-confirm").performClick()
+        compose.waitForIdle()
+        assertEquals("Coffee", model.state.value.category)
+        assertEquals(listOf("Coffee"), categories.values)
     }
 
     @Test fun listImageActionUsesActivityCallbackAndPickerCancellationKeepsList() {
@@ -385,7 +489,8 @@ class ExpenseScreenTest {
     private fun fillValidForm() {
         compose.onNodeWithTag("merchant-input").performScrollTo().performTextInput("Synthetic Cafe")
         compose.onNodeWithTag("amount-input").performScrollTo().performTextInput("125.50")
-        compose.onNodeWithTag("category-input").performScrollTo().performTextInput("Food")
+        compose.onNodeWithTag("category-input").performScrollTo().performClick()
+        compose.onNodeWithTag("category-option-Food").performClick()
     }
 
     private class FixtureRepository : ExpenseRepository, ImportedExpenseRepository {
@@ -419,6 +524,23 @@ class ExpenseScreenTest {
             deleteCalls++
             records.value = records.value.filterNot { it.id == id }
             return true
+        }
+    }
+
+    private class FixtureCategoryRepository(
+        private var failFirstLoad: Boolean = false,
+        private var failFirstAdd: Boolean = false,
+    ) : CategoryRepository {
+        var values = emptyList<String>()
+        override suspend fun loadCustomCategories(): List<String> {
+            if (failFirstLoad) { failFirstLoad = false; error("fixture load failure") }
+            return values
+        }
+        override suspend fun addCustomCategory(name: String): List<String> {
+            if (failFirstAdd) { failFirstAdd = false; error("fixture save failure") }
+            val existing = values.firstOrNull { it.equals(name, ignoreCase = true) }
+            if (existing == null) values = values + name
+            return values
         }
     }
 }

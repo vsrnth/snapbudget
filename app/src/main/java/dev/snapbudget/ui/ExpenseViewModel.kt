@@ -13,6 +13,9 @@ import dev.snapbudget.application.ReceiptImageSelection
 import dev.snapbudget.domain.ExpenseObservation
 import dev.snapbudget.domain.ExpenseRecord
 import dev.snapbudget.domain.ExpenseRepository
+import dev.snapbudget.domain.CategoryCatalog
+import dev.snapbudget.domain.CategoryRepository
+import dev.snapbudget.domain.InMemoryCategoryRepository
 import dev.snapbudget.domain.ImportedExpenseDraft
 import dev.snapbudget.domain.ImportedExpenseRepository
 import dev.snapbudget.domain.ManualExpenseDraft
@@ -59,6 +62,12 @@ data class ExpenseUiState(
     val sourceTransactionId: String? = null,
     val readingImage: Boolean = false,
     val duplicateImport: Boolean = false,
+    val categoryOptions: List<String> = CategoryCatalog.predefined,
+    val categoryDialogOpen: Boolean = false,
+    val newCategoryName: String = "",
+    val categoryError: String? = null,
+    val addingCategory: Boolean = false,
+    val categoryCatalogLoaded: Boolean = false,
 ) {
     val total: String get() = formatInr(totalPaise(expenses))
     val committing: Boolean get() = saving || deletingId == MUTATION_IN_PROGRESS
@@ -71,17 +80,23 @@ class ExpenseViewModel(
     private val savedState: SavedStateHandle = SavedStateHandle(),
     private val receiptImageReader: ReceiptImageReader? = null,
     private val importedExpenseRepository: ImportedExpenseRepository? = null,
+    private val categoryRepository: CategoryRepository = InMemoryCategoryRepository(),
 ) : ViewModel() {
     private val _state = MutableStateFlow(restoreState())
     val state: StateFlow<ExpenseUiState> = _state.asStateFlow()
     private var observationJob: Job? = null
     private var imageReadJob: Job? = null
     private var imageReadGeneration = 0
+    private var customCategories: List<String> = emptyList()
+    private var categoryCatalogLoaded = false
+    private var categoryLoadJob: Job? = null
 
     init {
+        refreshCategoryOptions()
         // A URI selection is ephemeral and must never be resumed after process recreation.
         if (_state.value.readingImage) _state.update { it.copy(readingImage = false, errorMessage = "Select the receipt image again to continue.") }
         observeExpenses()
+        categoryLoadJob = viewModelScope.launch { loadCategoryCatalog() }
     }
 
     private fun observeExpenses() {
@@ -91,7 +106,10 @@ class ExpenseViewModel(
                 _state.update { it.copy(loading = false, errorMessage = "Expenses could not be loaded. Please try again.") }
             }.collect { result ->
                 when (result) {
-                    is ExpenseObservation.Records -> _state.update { it.copy(expenses = result.expenses, loading = false, errorMessage = it.errorMessage?.takeUnless { message -> message.startsWith("Expenses could not be loaded") }) }
+                    is ExpenseObservation.Records -> {
+                        _state.update { it.copy(expenses = result.expenses, loading = false, errorMessage = it.errorMessage?.takeUnless { message -> message.startsWith("Expenses could not be loaded") }) }
+                        refreshCategoryOptions()
+                    }
                     ExpenseObservation.Failed -> _state.update { it.copy(loading = false, errorMessage = "Expenses could not be loaded. Please try again.") }
                 }
             }
@@ -104,8 +122,8 @@ class ExpenseViewModel(
     }
 
     fun openEditor() {
-        if (_state.value.committing) return
-        _state.update { it.copy(page = ExpensePage.EDIT, errors = emptyMap(), errorMessage = null, draft = null, importedDraft = null, sourceImageHash = null, sourceTransactionId = null, duplicateImport = false) }
+        if (_state.value.committing || _state.value.addingCategory) return
+        _state.update { it.copy(page = ExpensePage.EDIT, errors = emptyMap(), errorMessage = null, draft = null, importedDraft = null, sourceImageHash = null, sourceTransactionId = null, duplicateImport = false, categoryDialogOpen = false) }
         savedState.remove<String>("importImageHash")
         savedState.remove<String>("importTransactionId")
         savedState["readingImage"] = false
@@ -113,7 +131,7 @@ class ExpenseViewModel(
     }
 
     fun openImageImport() {
-        if (_state.value.committing || _state.value.readingImage) return
+        if (_state.value.committing || _state.value.readingImage || _state.value.addingCategory) return
         if (receiptImageReader == null || importedExpenseRepository == null) {
             _state.update { it.copy(errorMessage = "Receipt import is unavailable. Please try again later.") }
             return
@@ -132,7 +150,7 @@ class ExpenseViewModel(
     /** Called by the Activity's image-picker result callback; selection tokens are never persisted. */
     fun onTransactionImageSelected(selection: ReceiptImageSelection) {
         val reader = receiptImageReader ?: return
-        if (_state.value.committing) return
+        if (_state.value.committing || _state.value.addingCategory) return
         imageReadGeneration++
         val generation = imageReadGeneration
         imageReadJob?.cancel()
@@ -201,7 +219,103 @@ class ExpenseViewModel(
         val canonical = ExpenseDateTimeFormat.inputToCanonical(value)
         updateField("dateTime", canonical ?: value) { copy(dateTime = canonical ?: value) }
     }
-    fun updateCategory(value: String) = updateField("category", value) { copy(category = value) }
+    fun updateCategory(value: String) {
+        val canonical = CategoryCatalog.existingName(value, _state.value.categoryOptions) ?: return
+        updateField("category", canonical) { copy(category = canonical) }
+    }
+
+    fun openCategoryDialog() {
+        if (_state.value.page != ExpensePage.EDIT || _state.value.readingImage || _state.value.committing || _state.value.addingCategory) return
+        _state.update {
+            it.copy(
+                categoryDialogOpen = true,
+                newCategoryName = "",
+                categoryError = when {
+                    categoryCatalogLoaded -> null
+                    categoryLoadJob?.isActive == true -> "Saved categories are loading."
+                    else -> "Saved categories could not be loaded."
+                },
+            )
+        }
+    }
+
+    fun retryCategoryLoad() {
+        if (_state.value.addingCategory || categoryCatalogLoaded || categoryLoadJob?.isActive == true) return
+        categoryLoadJob = viewModelScope.launch { loadCategoryCatalog(showError = true) }
+    }
+
+    private suspend fun loadCategoryCatalog(showError: Boolean = false): Boolean {
+        return try {
+            customCategories = categoryRepository.loadCustomCategories()
+            categoryCatalogLoaded = true
+            _state.update { it.copy(categoryCatalogLoaded = true, categoryError = if (showError) null else it.categoryError) }
+            refreshCategoryOptions()
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            categoryCatalogLoaded = false
+            _state.update { it.copy(categoryCatalogLoaded = false, categoryError = if (showError) "Saved categories could not be loaded. Please retry." else it.categoryError) }
+            false
+        }
+    }
+
+    fun updateNewCategoryName(value: String) {
+        if (_state.value.addingCategory) return
+        _state.update { it.copy(newCategoryName = value, categoryError = null) }
+    }
+
+    fun closeCategoryDialog() {
+        if (_state.value.addingCategory) return
+        _state.update { it.copy(categoryDialogOpen = false, newCategoryName = "", categoryError = null) }
+    }
+
+    fun addCategory() {
+        val current = _state.value
+        if (!current.categoryDialogOpen || current.page != ExpensePage.EDIT || current.addingCategory || current.readingImage || current.committing) return
+        val error = CategoryCatalog.validationError(current.newCategoryName)
+        if (error != null) { _state.update { it.copy(categoryError = error) }; return }
+        val name = CategoryCatalog.normalizeName(current.newCategoryName)
+        val existing = CategoryCatalog.existingName(name, current.categoryOptions)
+        if (CategoryCatalog.existingName(name, CategoryCatalog.predefined) != null) {
+            selectCategory(existing ?: name)
+            closeCategoryDialog()
+            return
+        }
+        _state.update { it.copy(addingCategory = true, categoryError = null) }
+        viewModelScope.launch {
+            try {
+                if (!categoryCatalogLoaded) {
+                    categoryLoadJob?.join()
+                    if (!categoryCatalogLoaded && !loadCategoryCatalog(showError = true)) {
+                        _state.update { it.copy(addingCategory = false, categoryError = "Saved categories could not be loaded. Please retry.") }
+                        return@launch
+                    }
+                }
+                val canonical = CategoryCatalog.existingName(name, _state.value.categoryOptions) ?: name
+                val updated = categoryRepository.addCustomCategory(canonical)
+                customCategories = updated
+                refreshCategoryOptions()
+                if (_state.value.page == ExpensePage.EDIT && _state.value.categoryDialogOpen) {
+                    selectCategory(CategoryCatalog.existingName(name, _state.value.categoryOptions) ?: name)
+                    _state.update { it.copy(categoryDialogOpen = false, newCategoryName = "", categoryError = null, addingCategory = false) }
+                } else _state.update { it.copy(addingCategory = false, categoryDialogOpen = false) }
+            } catch (cancelled: CancellationException) {
+                _state.update { it.copy(addingCategory = false) }
+                throw cancelled
+            } catch (_: Exception) {
+                _state.update { it.copy(addingCategory = false, categoryError = "Category could not be saved. Please try again.") }
+            }
+        }
+    }
+
+    private fun selectCategory(value: String) {
+        updateField("category", value) { copy(category = value) }
+    }
+
+    private fun refreshCategoryOptions() {
+        _state.update { state -> state.copy(categoryOptions = CategoryCatalog.choices(customCategories, state.expenses.map { it.category }, state.category)) }
+    }
 
     private fun updateField(key: String, value: String, change: ExpenseUiState.() -> ExpenseUiState) {
         if (_state.value.committing || _state.value.readingImage) return
@@ -213,7 +327,7 @@ class ExpenseViewModel(
 
     fun review() {
         val s = _state.value
-        if (s.committing || s.readingImage) return
+        if (s.committing || s.readingImage || s.addingCategory) return
         if (s.sourceImageHash != null) {
             val corrected = ImportedExpenseDraft.create(
                 parsePositivePaise(s.amount) ?: 0L, s.merchant, s.dateTime, s.category,
@@ -301,11 +415,11 @@ class ExpenseViewModel(
     }
 
     fun cancelEditor() {
-        if (_state.value.committing) return
+        if (_state.value.committing || _state.value.addingCategory) return
         imageReadGeneration++
         imageReadJob?.cancel()
         imageReadJob = null
-        _state.update { it.copy(page = ExpensePage.LIST, merchant = "", amount = "", dateTime = now(), category = "Other", errors = emptyMap(), errorMessage = null, draft = null, importedDraft = null, sourceImageHash = null, sourceTransactionId = null, saving = false, readingImage = false, duplicateImport = false) }
+        _state.update { it.copy(page = ExpensePage.LIST, merchant = "", amount = "", dateTime = now(), category = "Other", errors = emptyMap(), errorMessage = null, draft = null, importedDraft = null, sourceImageHash = null, sourceTransactionId = null, saving = false, readingImage = false, duplicateImport = false, categoryDialogOpen = false) }
         clearSavedForm()
     }
 
