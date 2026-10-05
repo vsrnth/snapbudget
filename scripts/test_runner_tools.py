@@ -37,6 +37,34 @@ class RunnerProtocolTests(unittest.TestCase):
     def test_accepts_nonzero_success_and_ignores_per_test_minus_one(self):
         self.assertEqual(1, validate_instrumentation_output(SUCCESS))
 
+    def test_accepts_line_bounded_summary_terminal_whitespace_and_newlines(self):
+        for output in (
+            "OK (24 tests)\n\nINSTRUMENTATION_CODE: -1\n",
+            "  OK (2 tests) \t\r\n\r\n \tINSTRUMENTATION_CODE : -1 \t\r\n",
+            "OK (3 test)\n\n\nINSTRUMENTATION_CODE: -1\n",
+        ):
+            with self.subTest(output=output):
+                self.assertGreater(validate_instrumentation_output(output), 0)
+
+    def test_rejects_cross_line_summary_terminal_and_premature_terminal(self):
+        for output in (
+            "OK\n(2 tests)\nINSTRUMENTATION_CODE: -1\n",
+            "OK (2\n tests)\nINSTRUMENTATION_CODE: -1\n",
+            "OK (2 tests\n)\nINSTRUMENTATION_CODE: -1\n",
+            "OK (2 tests)\nINSTRUMENTATION_CODE:\n-1\n",
+            "INSTRUMENTATION_CODE: -1\n\nOK (2 tests)\n",
+        ):
+            with self.subTest(output=output), self.assertRaises(LocalTestError):
+                validate_instrumentation_output(output)
+
+    def test_rejects_failure_crash_and_timeout_even_when_success_summary_appears(self):
+        success_with_failure = SUCCESS + "FAILURES!!!\n"
+        for output in (success_with_failure, SUCCESS + CRASH):
+            with self.subTest(output=output), self.assertRaises(LocalTestError):
+                validate_instrumentation_output(output)
+        with self.assertRaisesRegex(LocalTestError, "timed out"):
+            validate_instrumentation_output(SUCCESS, timed_out=True)
+
     def test_rejects_zero_exit_junit_failure(self):
         with self.assertRaisesRegex(LocalTestError, "FAILURES"):
             validate_instrumentation_output(FAILURE, returncode=0)

@@ -86,13 +86,13 @@ def validate_instrumentation_output(output: str, returncode: int = 0,
     if re.search(r"(?im)^\s*INSTRUMENTATION_RESULT\s*:\s*(?:shortMsg|error)\s*=", output):
         raise LocalTestError("AndroidJUnitRunner returned an instrumentation error result.")
 
-    summaries = list(re.finditer(r"(?m)^\s*OK\s*\((\d+)\s+tests?\)\s*$", output))
+    summaries = list(re.finditer(r"(?m)^[ \t]*OK[ \t]*\((\d+)[ \t]+tests?\)[ \t]*\r?$", output))
     if not summaries:
         raise LocalTestError("Missing final successful AndroidJUnitRunner OK (N tests) summary.")
     count = int(summaries[-1].group(1))
     if count <= 0:
         raise LocalTestError("AndroidJUnitRunner reported a zero-test suite.")
-    terminals = list(re.finditer(r"(?m)^\s*INSTRUMENTATION_CODE\s*:\s*(-?\d+)\s*$", output))
+    terminals = list(re.finditer(r"(?m)^[ \t]*INSTRUMENTATION_CODE[ \t]*:[ \t]*(-?\d+)[ \t]*\r?$", output))
     if not terminals or terminals[-1].group(1) != "-1" or terminals[-1].start() < summaries[-1].end():
         raise LocalTestError("Missing successful terminal INSTRUMENTATION_CODE: -1 after test summary.")
     return count
