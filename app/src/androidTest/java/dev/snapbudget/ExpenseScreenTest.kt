@@ -96,6 +96,52 @@ class ExpenseScreenTest {
         assertEquals(1, repository.deleteCalls)
     }
 
+    @Test fun readableDateInputValidatesReviewsAndStoresCanonicalTimeOnlyAfterConfirmation() {
+        val repository = FixtureRepository()
+        val saved = SavedStateHandle(mapOf(
+            "page" to "EDIT", "merchant" to "", "amount" to "", "category" to "Other",
+            "dateTime" to "2025-05-03T21:41",
+        ))
+        val model = ExpenseViewModel(repository, saved)
+        compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
+        compose.onNodeWithTag("merchant-input").performTextInput("Synthetic Cafe")
+        compose.onNodeWithTag("amount-input").performTextInput("12.34")
+        val dateField = compose.onNodeWithTag("datetime-input").performScrollTo()
+        dateField.assertTextContains("Example: 3 May 2025, 9:41 PM")
+        val rootBounds = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        val dateBounds = dateField.fetchSemanticsNode().boundsInRoot
+        assertTrue(dateBounds.width > 0f && dateBounds.height > 0f)
+        assertTrue(dateBounds.left >= rootBounds.left && dateBounds.right <= rootBounds.right)
+        assertTrue(dateBounds.top >= rootBounds.top && dateBounds.bottom <= rootBounds.bottom)
+        dateField.assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("3 May 2025, 9:41 PM")),
+        )
+        dateField.performTextClearance()
+        dateField.performTextInput("3 May 2025, ")
+        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
+        compose.onNodeWithText("Enter a valid date and time, for example 3 May 2025, 9:41 PM.").performScrollTo().assertExists()
+        assertEquals(0, repository.insertCalls)
+
+        dateField.performTextClearance()
+        dateField.performTextInput("31 Feb 2025, 9:41 PM")
+        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
+        compose.onNodeWithText("Enter a valid date and time, for example 3 May 2025, 9:41 PM.").performScrollTo().assertExists()
+        assertEquals(0, repository.insertCalls)
+
+        dateField.performTextClearance()
+        dateField.performTextInput("3 May 2025, 9:41 PM")
+        assertEquals("2025-05-03T21:41", saved.get<String>("dateTime"))
+        compose.onNodeWithTag("review-expense").performScrollTo().performClick()
+        compose.onNodeWithTag("review-Date and time").performScrollTo().assertTextEquals("3 May 2025, 9:41 PM")
+        assertEquals(0, repository.insertCalls)
+        compose.onNodeWithTag("confirm-save").performScrollTo().performClick()
+        compose.waitForIdle()
+        assertEquals(1, repository.insertCalls)
+        assertEquals(LocalDateTime.of(2025, 5, 3, 21, 41), repository.savedDateTimes.single())
+        compose.onNodeWithTag("expense-1").performScrollTo().assertExists()
+        compose.onNodeWithText("Other · 3 May 2025, 9:41 PM").performScrollTo().assertExists()
+    }
+
     @Test fun imageImportRequiresExplicitReviewAndKeepsIdentityAcrossCorrections() {
         val repository = FixtureRepository()
         val hash = "a".repeat(64)
@@ -122,7 +168,8 @@ class ExpenseScreenTest {
         compose.onNodeWithTag("merchant-input").performTextInput("Corrected Cafe")
         compose.onNodeWithTag("amount-input").performScrollTo().performTextClearance()
         compose.onNodeWithTag("amount-input").performTextInput("13.37")
-        compose.onNodeWithTag("datetime-input").performScrollTo().performTextInput("2025-05-03T21:41")
+        compose.onNodeWithTag("datetime-input").performScrollTo().performTextClearance()
+        compose.onNodeWithTag("datetime-input").performTextInput("3 May 2025, 9:41 PM")
         compose.onNodeWithTag("review-expense").performScrollTo().performClick()
         compose.onNodeWithTag("review-title").performScrollTo().assertExists()
         compose.onNodeWithTag("review-Merchant").performScrollTo().assertTextContains("Corrected Cafe")
@@ -299,9 +346,31 @@ class ExpenseScreenTest {
         val model = ExpenseViewModel(repository, saved)
         compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
         compose.onNodeWithTag("review-title").assertExists()
+        compose.onNodeWithTag("review-Date and time").assertTextEquals("3 May 2025, 9:41 PM")
         compose.onNodeWithTag("confirm-save").performClick()
         compose.waitForIdle()
         assertEquals(listOf("manual:stable-token"), repository.tokens)
+    }
+
+    @Test fun legacyCanonicalSavedStateRestoresAsReadableEditableDateAndKeepsImportIdentity() {
+        val repository = FixtureRepository()
+        val saved = SavedStateHandle(mapOf(
+            "page" to "EDIT", "merchant" to "Synthetic Cafe", "amount" to "125.50",
+            "dateTime" to "2025-05-03T21:41", "category" to "Food",
+            "importImageHash" to "f".repeat(64), "importTransactionId" to "TX-SYNTHETIC-1",
+        ))
+        val model = ExpenseViewModel(repository, saved)
+        compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
+        val dateField = compose.onNodeWithTag("datetime-input").performScrollTo()
+        dateField.assert(SemanticsMatcher.expectValue(
+            SemanticsProperties.EditableText,
+            AnnotatedString("3 May 2025, 9:41 PM"),
+        ))
+        compose.onNodeWithTag("transaction-identity").performScrollTo()
+            .assertTextEquals("Transaction ID: TX-SYNTHETIC-1")
+        assertEquals("2025-05-03T21:41", saved.get<String>("dateTime"))
+        assertEquals("f".repeat(64), saved.get<String>("importImageHash"))
+        assertEquals("TX-SYNTHETIC-1", saved.get<String>("importTransactionId"))
     }
 
     private fun savedStateCopy(source: SavedStateHandle): SavedStateHandle =
@@ -321,6 +390,7 @@ class ExpenseScreenTest {
 
     private class FixtureRepository : ExpenseRepository, ImportedExpenseRepository {
         private val records = MutableStateFlow<List<ExpenseRecord>>(emptyList())
+        val savedDateTimes = mutableListOf<LocalDateTime>()
         var insertCalls = 0
         var deleteCalls = 0
         var importCalls = 0
@@ -333,6 +403,7 @@ class ExpenseScreenTest {
             insertCalls++
             insertGate?.await()
             tokens += draft.operationToken
+            savedDateTimes += draft.dateTime
             val record = ExpenseRecord(1, draft.amountPaise, draft.merchant, draft.dateTime, draft.category)
             records.value = listOf(record)
             return AddExpenseResult.Inserted(1)

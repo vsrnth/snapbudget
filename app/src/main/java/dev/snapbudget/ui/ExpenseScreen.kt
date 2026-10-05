@@ -41,7 +41,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import dev.snapbudget.domain.formatInr
-import java.time.format.DateTimeFormatter
 
 @Composable
 fun ExpenseScreen(viewModel: ExpenseViewModel, onChooseTransactionImage: () -> Unit = {}) {
@@ -111,7 +110,7 @@ private fun ExpenseList(state: ExpenseUiState, vm: ExpenseViewModel, onChooseTra
                 Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(expense.merchant, style = MaterialTheme.typography.titleMedium)
-                        Text("${expense.category} · ${expense.dateTime.format(DateTimeFormatter.ofPattern("dd MMM yyyy, HH:mm"))}", style = MaterialTheme.typography.bodySmall)
+                        Text("${expense.category} · ${ExpenseDateTimeFormat.format(expense.dateTime)}", style = MaterialTheme.typography.bodySmall)
                     }
                     Spacer(Modifier.width(12.dp))
                     Column(horizontalAlignment = Alignment.End) {
@@ -137,7 +136,7 @@ private fun Editor(state: ExpenseUiState, vm: ExpenseViewModel, onChooseTransact
     if (state.sourceTransactionId != null) Text("Transaction ID: ${state.sourceTransactionId}", modifier = Modifier.testTag("transaction-identity"))
     EntryField("Merchant", state.merchant, vm::updateMerchant, state.errors["merchant"], tag = "merchant-input")
     EntryField("Amount in INR", state.amount, vm::updateAmount, state.errors["amount"], keyboard = KeyboardType.Decimal, tag = "amount-input", prefix = "₹")
-    EntryField("Local date and time", state.dateTime, vm::updateDateTime, state.errors["dateTime"], tag = "datetime-input", supporting = "Format: YYYY-MM-DDTHH:MM (24-hour local time)")
+    EntryField("Date and time", ExpenseDateTimeFormat.canonicalToReadable(state.dateTime), vm::updateDateTime, state.errors["dateTime"], tag = "datetime-input", supporting = "Example: ${ExpenseDateTimeFormat.EXAMPLE}")
     EntryField("Category", state.category, vm::updateCategory, state.errors["category"], tag = "category-input")
     state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("recoverable-error")) }
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -169,7 +168,7 @@ private fun Review(state: ExpenseUiState, vm: ExpenseViewModel) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             ReviewValue("Merchant", draft?.merchant ?: imported!!.merchant)
             ReviewValue("Amount", formatInr(draft?.amountPaise ?: imported!!.amountPaise))
-            ReviewValue("Date and time", (draft?.dateTime ?: imported!!.dateTime).format(DateTimeFormatter.ofPattern("dd MMM yyyy, HH:mm")))
+            ReviewValue("Date and time", ExpenseDateTimeFormat.format(draft?.dateTime ?: imported!!.dateTime))
             ReviewValue("Category", draft?.category ?: imported!!.category)
             imported?.let {
                 ReviewValue("Original image identity", it.imageHash)

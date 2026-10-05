@@ -83,7 +83,7 @@ class GooglePayReviewTest {
             SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("123.45")),
         )
         compose.onNodeWithTag("datetime-input").performScrollTo().assert(
-            SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("2025-05-03T08:22")),
+            SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("3 May 2025, 8:22 AM")),
         )
         compose.onNodeWithTag("transaction-identity").performScrollTo()
             .assertTextEquals("Transaction ID: GPAY:UPI:123456789012")
@@ -92,7 +92,7 @@ class GooglePayReviewTest {
         compose.onNodeWithTag("review-expense").performScrollTo().performClick()
         compose.onNodeWithTag("review-Merchant").performScrollTo().assertTextContains("Synthetic Shop")
         compose.onNodeWithTag("review-Amount").performScrollTo().assertTextContains("₹123.45")
-        compose.onNodeWithTag("review-Date and time").performScrollTo().assertTextContains("03 May 2025, 08:22")
+        compose.onNodeWithTag("review-Date and time").performScrollTo().assertTextContains("3 May 2025, 8:22 AM")
         compose.onNodeWithTag("review-Transaction ID").performScrollTo()
             .assertTextContains("GPAY:UPI:123456789012")
         val root = compose.onRoot().fetchSemanticsNode().boundsInRoot

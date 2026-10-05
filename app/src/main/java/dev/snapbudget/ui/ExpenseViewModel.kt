@@ -197,7 +197,10 @@ class ExpenseViewModel(
 
     fun updateMerchant(value: String) = updateField("merchant", value) { copy(merchant = value) }
     fun updateAmount(value: String) = updateField("amount", value) { copy(amount = value) }
-    fun updateDateTime(value: String) = updateField("dateTime", value) { copy(dateTime = value) }
+    fun updateDateTime(value: String) {
+        val canonical = ExpenseDateTimeFormat.inputToCanonical(value)
+        updateField("dateTime", canonical ?: value) { copy(dateTime = canonical ?: value) }
+    }
     fun updateCategory(value: String) = updateField("category", value) { copy(category = value) }
 
     private fun updateField(key: String, value: String, change: ExpenseUiState.() -> ExpenseUiState) {
@@ -220,7 +223,7 @@ class ExpenseViewModel(
                 val errors = buildMap {
                     if (s.merchant.trim().isEmpty() || s.merchant.length > 120) put("merchant", "Enter a merchant name (up to 120 characters).")
                     if (parsePositivePaise(s.amount) == null) put("amount", "Enter an amount greater than ₹0, with up to two decimal places.")
-                    if (runCatching { LocalDateTime.parse(s.dateTime, strictLocalDateTimeFormatter) }.isFailure) put("dateTime", "Enter a valid local date and time as YYYY-MM-DDTHH:MM.")
+                    if (!ExpenseDateTimeFormat.isValidInput(s.dateTime)) put("dateTime", "Enter a valid date and time, for example ${ExpenseDateTimeFormat.EXAMPLE}.")
                     if (s.category.trim().isEmpty() || s.category.length > 60) put("category", "Enter a category (up to 60 characters).")
                 }
                 _state.update { it.copy(errors = errors) }
@@ -239,7 +242,7 @@ class ExpenseViewModel(
             val errors = buildMap {
                 if (s.merchant.trim().isEmpty() || s.merchant.length > 120) put("merchant", "Enter a merchant name (up to 120 characters).")
                 if (parsePositivePaise(s.amount) == null) put("amount", "Enter an amount greater than ₹0, with up to two decimal places.")
-                if (runCatching { LocalDateTime.parse(s.dateTime, strictLocalDateTimeFormatter) }.isFailure) put("dateTime", "Enter a valid local date and time as YYYY-MM-DDTHH:MM.")
+                if (!ExpenseDateTimeFormat.isValidInput(s.dateTime)) put("dateTime", "Enter a valid date and time, for example ${ExpenseDateTimeFormat.EXAMPLE}.")
                 if (s.category.trim().isEmpty() || s.category.length > 60) put("category", "Enter a category (up to 60 characters).")
             }
             _state.update { it.copy(errors = errors, draft = null) }
