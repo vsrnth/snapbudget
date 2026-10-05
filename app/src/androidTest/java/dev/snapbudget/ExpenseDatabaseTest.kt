@@ -76,8 +76,12 @@ class ExpenseDatabaseTest {
         @Suppress("DEPRECATION")
         fun permissions(packageName: String) = context.packageManager
             .getPackageInfo(packageName, PackageManager.GET_PERMISSIONS).requestedPermissions.orEmpty()
-        assertFalse(permissions(context.packageName).contains("android.permission.INTERNET"))
-        assertFalse(permissions(instrumentation.context.packageName).contains("android.permission.INTERNET"))
+        val forbiddenPermissions = setOf(
+            "android.permission.INTERNET",
+            "android.permission.ACCESS_NETWORK_STATE",
+        )
+        assertTrue(permissions(context.packageName).intersect(forbiddenPermissions).isEmpty())
+        assertTrue(permissions(instrumentation.context.packageName).intersect(forbiddenPermissions).isEmpty())
         assertEquals(0, info.flags and android.content.pm.ApplicationInfo.FLAG_ALLOW_BACKUP)
     }
 
