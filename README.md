@@ -1,6 +1,6 @@
 # SnapBudget
 
-SnapBudget is an offline-first Android expense-tracking app scaffold. Its product UI is not implemented yet; the launcher activity named in the current manifest does not exist. The local test harness is deliberately separate from product UI.
+SnapBudget is an offline-first Android expense tracker. The launcher supports manual expense entry and user-selected receipt-image import, review before save, all-time totals, and explicit deletion. Confirmed expenses are stored locally. Receipt images are read transiently for on-device OCR and are not retained. See [docs/testing.md](docs/testing.md) for coverage and limitations.
 
 ## Local checks
 
@@ -19,6 +19,6 @@ scripts/test-local.sh device --serial emulator-5554
 scripts/test-local.sh all --serial emulator-5554
 ```
 
-Device tests are local-only and reject CI. The selected device must already be offline (airplane mode enabled and Wi-Fi disabled); the runner never changes device networking or boots/manipulates devices. The date parser test is intentionally RED for a known production parser bug; details and separate infrastructure coverage are in the test guide.
+Device tests are local-only and reject CI. The selected device must already be offline (airplane mode enabled and Wi-Fi disabled); the runner never changes device networking or boots/manipulates devices. Date parsing is covered by JVM assertions, including strict calendar validation. An earlier API 37 emulator run completed with 24/24 tests passing. The latest focused OCR retry tests passed 14/14; the latest full 34-test suite remains pending after concurrent instrumentation/deployment activity interrupted the runs. API 36 runtime validation remains pending. See the [test guide](docs/testing.md) for details.
 
 For optional read-only Gemini Android Studio Agent Mode setup and safety boundaries, see [docs/gemini-agent-mode.md](docs/gemini-agent-mode.md).
