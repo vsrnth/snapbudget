@@ -43,6 +43,23 @@ class ImportedExpenseDraftTest {
         assertNull(create(transactionId = "T123"))
         assertNull(create(transactionId = " T123456789012345"))
         assertNull(create(transactionId = "T" + "1".repeat(36)))
+        assertNotNull(create(transactionId = "GPAY:UPI:123456789012"))
+        assertNotNull(create(transactionId = "GPAY:GOOGLE:Abc_123-xY"))
+        assertNull(create(transactionId = "GPAY:UPI:12345678901"))
+        assertNull(create(transactionId = "GPAY:UPI:1234567890123"))
+        assertNull(create(transactionId = "GPAY:GOOGLE:abc"))
+        assertNull(create(transactionId = "GPAY:GOOGLE:" + "x".repeat(129)))
+        assertNull(create(transactionId = "GPAY:UNTRUSTED:123456789012"))
+        assertNull(create(transactionId = "gpay:UPI:123456789012"))
+    }
+
+    @Test fun preservesCanonicalGooglePayIdentityAndOpaqueIdCaseAcrossCorrections() {
+        for (transactionId in listOf("GPAY:UPI:123456789012", "GPAY:GOOGLE:AbC_xY-123")) {
+            val draft = create(transactionId = transactionId)!!
+            val corrected = draft.withCorrections(9_999L, "Synthetic Store", "2025-05-04T09:15", "Other")!!
+            assertEquals(transactionId, corrected.transactionId)
+            assertEquals(hash, corrected.imageHash)
+        }
     }
 
     private fun create(

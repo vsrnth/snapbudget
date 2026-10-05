@@ -8,9 +8,10 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import dev.snapbudget.Receipt
-import dev.snapbudget.ReceiptParser
 import dev.snapbudget.ReceiptTextBlock
 import dev.snapbudget.ReceiptTextLayout
+import dev.snapbudget.parsing.ProviderReceiptParser
+import dev.snapbudget.parsing.ReceiptParserFactory
 import dev.snapbudget.application.ReceiptImagePreview
 import dev.snapbudget.application.ReceiptImageReadResult
 import dev.snapbudget.application.ReceiptImageReader
@@ -78,11 +79,13 @@ class ContentResolverReceiptImageReader internal constructor(
                 val firstLayout = withTimeout(OCR_TIMEOUT_MILLIS) {
                     performRecognition(oriented) { recyclePair(oriented, bitmap) }
                 }
-                val initialParsed = ReceiptParser.parse(firstLayout)
-                if (!initialParsed.eligible || !firstLayout.text.contains("PhonePe", ignoreCase = true)) {
+                val selectedParser = ReceiptParserFactory.create(firstLayout)
+                    ?: return@withContext ReceiptImageReadResult.Unsupported
+                val initialParsed = selectedParser.parse(firstLayout)
+                if (!initialParsed.eligible) {
                     ReceiptImageReadResult.Unsupported
                 } else {
-                    val selected = if (initialParsed.amountPaise != null) {
+                    val selected = if (!selectedParser.needsMoreDetail(initialParsed)) {
                         initialParsed
                     } else {
                         parseHigherResolutionIfAvailable(
@@ -91,6 +94,7 @@ class ContentResolverReceiptImageReader internal constructor(
                             sourceHeight = dimensions.second,
                             initialResolution = initialResolution,
                             initialParsed = initialParsed,
+                            selectedParser = selectedParser,
                             ocrStartedAtNanos = ocrStartedAt,
                         ) ?: initialParsed
                     }
@@ -210,6 +214,7 @@ class ContentResolverReceiptImageReader internal constructor(
         sourceHeight: Int,
         initialResolution: Long,
         initialParsed: Receipt,
+        selectedParser: ProviderReceiptParser,
         ocrStartedAtNanos: Long,
     ): Receipt? {
         val elapsedMillis = (System.nanoTime() - ocrStartedAtNanos) / NANOS_PER_MILLI
@@ -239,14 +244,18 @@ class ContentResolverReceiptImageReader internal constructor(
                     return@withTimeoutOrNull null
                 }
                 val detailedLayout = performRecognition(oriented) { recyclePair(oriented, decoded) }
-                val detailed = ReceiptParser.parse(detailedLayout)
-                if (!detailed.eligible || !detailedLayout.text.contains("PhonePe", ignoreCase = true) ||
-                    detailed.amountPaise == null
-                ) return@withTimeoutOrNull null
+                val detailedParser = ReceiptParserFactory.create(detailedLayout)
+                if (detailedParser == null || detailedParser.provider != selectedParser.provider) {
+                    return@withTimeoutOrNull null
+                }
+                val detailed = detailedParser.parse(detailedLayout)
+                if (!detailed.eligible) return@withTimeoutOrNull null
                 val initialId = initialParsed.transactionId
                 val detailedId = detailed.transactionId
-                if (initialId != null && detailedId != null && initialId != detailedId) null
-                else initialParsed.copy(amountPaise = detailed.amountPaise)
+                if (initialId != null && detailedId != null && initialId != detailedId) {
+                    return@withTimeoutOrNull null
+                }
+                selectedParser.mergeDetailed(initialParsed, detailed).takeIf { it != initialParsed }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled

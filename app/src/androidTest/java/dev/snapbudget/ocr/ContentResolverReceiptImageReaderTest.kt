@@ -75,6 +75,26 @@ class ContentResolverReceiptImageReaderTest {
         assertEquals(MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }, preview.imageHash)
     }
 
+    @Test fun rejectsUnknownAndMixedProviderLayouts() = runBlocking {
+        val bytes = syntheticReceiptPng()
+        val unknown = SyntheticResolver(bytes, "image/png").reader { _, done ->
+            try {
+                ReceiptTextLayout("Transaction Successful\nPaid to\nSynthetic Shop\nINR 123.45", emptyList())
+            } finally { done() }
+        }.read(ReceiptImageSelection("content://fixture/unknown"))
+        assertEquals(ReceiptImageReadResult.Unsupported, unknown)
+
+        val mixed = SyntheticResolver(bytes, "image/png").reader { _, done ->
+            try {
+                ReceiptTextLayout(
+                    "PhonePe\nTransaction Successful\nPaid to\nSynthetic Shop\nGoogle Pay\nCompleted\nINR 123.45",
+                    emptyList(),
+                )
+            } finally { done() }
+        }.read(ReceiptImageSelection("content://fixture/mixed"))
+        assertEquals(ReceiptImageReadResult.Unsupported, mixed)
+    }
+
     @Test fun retriesLargeImageAtHigherResolutionAfterSampledCandidateConflict() = runBlocking {
         val bytes = syntheticReceiptPng(
             lines = listOf("PhonePe", "Transaction Successful", "Paid to", "Synthetic Bakery", "Transaction Details"),
@@ -140,6 +160,32 @@ class ContentResolverReceiptImageReaderTest {
         assertEquals("T11111111111111111", preview.transactionId)
         assertEquals(2, calls)
         assertEquals(1, resolver.openCount)
+    }
+
+    @Test fun crossProviderDetailCannotSupplyAmountWhenInitialTransactionIdIsMissing() = runBlocking {
+        val resolver = SyntheticResolver(syntheticReceiptPng(width = 4_200, height = 3_200), "image/png")
+        val layouts = listOf(
+            ReceiptTextLayout(
+                "PhonePe\nTransaction Successful\nPaid to\nSynthetic Cafe\n9:41 PM on 03 MAY 2025",
+                emptyList(),
+            ),
+            ReceiptTextLayout(
+                "Google Pay\nPayment of INR 125.50 completed\nCompleted\n3 May 2025, 8:22am\n" +
+                    "UPI transaction ID\n123456789012\nTo: Synthetic Shop\nGoogle transaction ID\nGPA1234567890",
+                emptyList(),
+            ),
+        )
+        var calls = 0
+        val result = resolver.reader { _, done -> try { layouts[calls++] } finally { done() } }
+            .read(ReceiptImageSelection("content://fixture/cross-provider-detail"))
+
+        assertTrue(result is ReceiptImageReadResult.Ready)
+        val preview = (result as ReceiptImageReadResult.Ready).preview
+        assertNull(preview.amountPaise)
+        assertEquals("Synthetic Cafe", preview.merchant)
+        assertEquals("2025-05-03T21:41", preview.dateTime.toString())
+        assertNull(preview.transactionId)
+        assertEquals(2, calls)
     }
 
     @Test fun retriesDoNotOccurForPresentAmountUnsupportedReceiptOrNoHigherResolution() = runBlocking {

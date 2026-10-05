@@ -1,0 +1,18 @@
+To Synthetic Healthcare
+₹123.45
+UPI Intent
+Completed
+3 May 2025, 8:22am
+Synthetic Bank 4321
+Payment of ₹123.45 completed
+Synthetic Healthcare confirmed this payment
+UPI transaction ID
+123456789012
+To: Synthetic Healthcare Private Limited
+synthetic-care@example
+From: Synthetic Sender (Bank)
+sender@example
+on Google Pay
+Google transaction ID
+AbC123xyz_456
+G Pay

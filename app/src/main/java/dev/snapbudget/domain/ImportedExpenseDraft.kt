@@ -12,7 +12,7 @@ private val importedDateTimeFormatter = DateTimeFormatterBuilder()
     .toFormatter(Locale.ROOT)
     .withResolverStyle(ResolverStyle.STRICT)
 private val sha256Pattern = Regex("[0-9a-fA-F]{64}")
-private val transactionIdPattern = Regex("T[0-9]{15,35}")
+private val transactionIdPattern = Regex("(?:T[0-9]{15,35}|GPAY:UPI:[0-9]{12}|GPAY:GOOGLE:[A-Za-z0-9_-]{6,128})")
 
 /** User-correctable receipt fields bound to immutable original-image and transaction identities. */
 class ImportedExpenseDraft private constructor(
