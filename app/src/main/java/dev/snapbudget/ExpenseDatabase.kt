@@ -22,6 +22,8 @@ interface ExpenseDao {
     fun observe(): Flow<List<Expense>>
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(expense: Expense): Long
+    @Query("UPDATE expenses SET amountPaise = :amountPaise, merchant = :merchant, dateTime = :dateTime, category = :category WHERE id = :id")
+    suspend fun updateEditableFields(id: Long, amountPaise: Long, merchant: String, dateTime: String, category: String): Int
     @Query("DELETE FROM expenses WHERE id = :id")
     suspend fun delete(id: Long)
 }

@@ -31,6 +31,11 @@ import dev.snapbudget.domain.ExpenseRepository
 import dev.snapbudget.domain.ManualExpenseDraft
 import dev.snapbudget.domain.ImportedExpenseDraft
 import dev.snapbudget.domain.ImportedExpenseRepository
+import dev.snapbudget.domain.ExpenseEditDraft
+import dev.snapbudget.domain.UpdateExpenseResult
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneId
 import dev.snapbudget.domain.CategoryRepository
 import dev.snapbudget.application.ReceiptImageReader
 import dev.snapbudget.application.ReceiptImageReadResult
@@ -70,6 +75,53 @@ class ExpenseScreenTest {
         compose.onNodeWithTag("save-expense").performClick()
         compose.onNodeWithText("Enter an amount greater than ₹0, with up to two decimal places.").assertExists()
         assertEquals(0, repository.insertCalls)
+    }
+
+    @Test fun monthDestinationFiltersLocalDateTotalsAndEditCanMoveExpenseOutOfMonth() {
+        val repository = FixtureRepository()
+        repository.seed(
+            ExpenseRecord(1, 125, "February", LocalDateTime.parse("2024-02-29T23:59"), "Food"),
+            ExpenseRecord(2, 75, "March", LocalDateTime.parse("2024-03-01T00:00"), "Travel"),
+        )
+        val fixedClock = Clock.fixed(Instant.parse("2024-02-15T12:00:00Z"), ZoneId.of("UTC"))
+        val model = ExpenseViewModel(repository, clock = fixedClock)
+        compose.setContent { SnapBudgetTheme { ExpenseScreen(model) } }
+        compose.waitForIdle()
+
+        compose.onNodeWithTag("open-navigation").assertExists()
+        val menuBounds = compose.onNodeWithTag("open-navigation").fetchSemanticsNode().boundsInRoot
+        assertTrue(menuBounds.width >= 48f * compose.density.density && menuBounds.height >= 48f * compose.density.density)
+        compose.onNodeWithTag("open-navigation").performClick()
+        compose.onNodeWithTag("destination-month").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("month-title").assertTextContains("February 2024")
+        compose.onNodeWithTag("month-total").assertTextContains("₹1.25")
+        compose.onNodeWithTag("month-count").assertTextContains("1 expense")
+        compose.onNodeWithTag("expense-1").assertExists()
+        compose.onNodeWithTag("expense-2").assertDoesNotExist()
+
+        compose.onNodeWithTag("open-navigation").performClick()
+        compose.onNodeWithTag("destination-month").assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, true))
+        compose.activityRule.scenario.onActivity { activity -> activity.onBackPressedDispatcher.onBackPressed() }
+        compose.waitForIdle()
+        assertEquals(ExpensePage.MONTH, model.state.value.page)
+        compose.activityRule.scenario.onActivity { activity -> activity.onBackPressedDispatcher.onBackPressed() }
+        compose.waitForIdle()
+        assertEquals(ExpensePage.LIST, model.state.value.page)
+        compose.onNodeWithTag("open-navigation").performClick()
+        compose.onNodeWithTag("destination-all").assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, true))
+        compose.onNodeWithTag("destination-month").performClick()
+
+        compose.onNodeWithTag("edit-1").performScrollTo().performClick()
+        compose.onNodeWithTag("edit-editor-title").assertExists()
+        assertEquals("February", model.state.value.merchant)
+        compose.onNodeWithTag("datetime-input").performScrollTo().performTextClearance()
+        compose.onNodeWithTag("datetime-input").performTextInput("2024-03-01T00:01")
+        compose.onNodeWithTag("save-edit").performScrollTo().performClick()
+        compose.waitForIdle()
+        assertEquals(ExpensePage.MONTH, model.state.value.page)
+        compose.onNodeWithTag("month-empty-state").assertExists()
+        compose.onNodeWithTag("month-total").assertTextContains("₹0.00")
+        compose.onNodeWithTag("month-count").assertTextContains("0 expenses")
     }
 
     @Test fun categoryDropdownIsReadOnlyAndCustomCategoriesPersistAcrossEditorCancellation() {
@@ -495,6 +547,7 @@ class ExpenseScreenTest {
         var importResult: AddExpenseResult = AddExpenseResult.Inserted(2)
         val tokens = mutableListOf<String>()
         var insertGate: CompletableDeferred<Unit>? = null
+        fun seed(vararg expenses: ExpenseRecord) { records.value = expenses.toList() }
         override fun observeExpenses(): Flow<ExpenseObservation> = records.asStateFlow().map { ExpenseObservation.Records(it) }
         override suspend fun addManualExpense(draft: ManualExpenseDraft): AddExpenseResult {
             insertCalls++
@@ -511,6 +564,12 @@ class ExpenseScreenTest {
             val record = ExpenseRecord(2, draft.amountPaise, draft.merchant, draft.dateTime, draft.category)
             if (importResult is AddExpenseResult.Inserted) records.value = records.value + record
             return importResult
+        }
+        override suspend fun updateExpense(draft: ExpenseEditDraft): UpdateExpenseResult {
+            val index = records.value.indexOfFirst { it.id == draft.id }
+            if (index < 0) return UpdateExpenseResult.Missing
+            records.value = records.value.toMutableList().also { it[index] = ExpenseRecord(draft.id, draft.amountPaise, draft.merchant, draft.dateTime, draft.category) }
+            return UpdateExpenseResult.Updated
         }
         override suspend fun deleteExpense(id: Long): Boolean {
             deleteCalls++

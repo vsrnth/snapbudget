@@ -14,9 +14,16 @@ sealed interface AddExpenseResult {
     data object Failed : AddExpenseResult
 }
 
+sealed interface UpdateExpenseResult {
+    data object Updated : UpdateExpenseResult
+    data object Missing : UpdateExpenseResult
+    data object Failed : UpdateExpenseResult
+}
+
 /** Persistence boundary for local expense records. Implementations must preserve cancellation. */
 interface ExpenseRepository {
     fun observeExpenses(): Flow<ExpenseObservation>
     suspend fun addManualExpense(draft: ManualExpenseDraft): AddExpenseResult
+    suspend fun updateExpense(draft: ExpenseEditDraft): UpdateExpenseResult
     suspend fun deleteExpense(id: Long): Boolean
 }

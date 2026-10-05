@@ -4,11 +4,13 @@ import dev.snapbudget.Expense
 import dev.snapbudget.ExpenseDao
 import dev.snapbudget.domain.AddExpenseResult
 import dev.snapbudget.domain.ExpenseObservation
+import dev.snapbudget.domain.ExpenseEditDraft
 import dev.snapbudget.domain.ExpenseRecord
 import dev.snapbudget.domain.ExpenseRepository
 import dev.snapbudget.domain.ImportedExpenseDraft
 import dev.snapbudget.domain.ImportedExpenseRepository
 import dev.snapbudget.domain.ManualExpenseDraft
+import dev.snapbudget.domain.UpdateExpenseResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -39,6 +41,24 @@ class RoomExpenseRepository(private val dao: ExpenseDao) : ExpenseRepository, Im
         throw cancelled
     } catch (_: Exception) {
         AddExpenseResult.Failed
+    }
+
+    override suspend fun updateExpense(draft: ExpenseEditDraft): UpdateExpenseResult = try {
+        when (dao.updateEditableFields(
+            id = draft.id,
+            amountPaise = draft.amountPaise,
+            merchant = draft.merchant,
+            dateTime = draft.dateTime.toString(),
+            category = draft.category,
+        )) {
+            1 -> UpdateExpenseResult.Updated
+            0 -> UpdateExpenseResult.Missing
+            else -> UpdateExpenseResult.Failed
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        UpdateExpenseResult.Failed
     }
 
     override suspend fun addImportedExpense(draft: ImportedExpenseDraft): AddExpenseResult = try {

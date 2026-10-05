@@ -27,6 +27,8 @@ import dev.snapbudget.domain.ExpenseRepository
 import dev.snapbudget.domain.ImportedExpenseDraft
 import dev.snapbudget.domain.ImportedExpenseRepository
 import dev.snapbudget.domain.ManualExpenseDraft
+import dev.snapbudget.domain.ExpenseEditDraft
+import dev.snapbudget.domain.UpdateExpenseResult
 import dev.snapbudget.parsing.ReceiptParserFactory
 import dev.snapbudget.ui.ExpenseScreen
 import dev.snapbudget.ui.ExpenseViewModel
@@ -137,6 +139,8 @@ class GooglePayReviewTest {
             .map { ExpenseObservation.Records(it) }
 
         override suspend fun addManualExpense(draft: ManualExpenseDraft) = AddExpenseResult.Failed
+
+        override suspend fun updateExpense(draft: ExpenseEditDraft): UpdateExpenseResult = UpdateExpenseResult.Failed
 
         override suspend fun addImportedExpense(draft: ImportedExpenseDraft): AddExpenseResult {
             importCalls++

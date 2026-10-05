@@ -38,6 +38,7 @@ private object NoReceiptImageReader : ReceiptImageReader {
 private class FixtureExpenseRepository : ExpenseRepository, ImportedExpenseRepository {
     override fun observeExpenses(): Flow<ExpenseObservation> = flowOf(ExpenseObservation.Records(emptyList()))
     override suspend fun addManualExpense(draft: ManualExpenseDraft): AddExpenseResult = AddExpenseResult.Inserted(1L)
+    override suspend fun updateExpense(draft: dev.snapbudget.domain.ExpenseEditDraft): dev.snapbudget.domain.UpdateExpenseResult = dev.snapbudget.domain.UpdateExpenseResult.Missing
     override suspend fun addImportedExpense(draft: ImportedExpenseDraft): AddExpenseResult = AddExpenseResult.Inserted(1L)
     override suspend fun deleteExpense(id: Long): Boolean = true
 }

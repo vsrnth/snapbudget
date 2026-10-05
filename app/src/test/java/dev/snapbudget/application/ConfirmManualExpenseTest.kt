@@ -2,8 +2,10 @@ package dev.snapbudget.application
 
 import dev.snapbudget.domain.AddExpenseResult
 import dev.snapbudget.domain.ExpenseObservation
+import dev.snapbudget.domain.ExpenseEditDraft
 import dev.snapbudget.domain.ExpenseRepository
 import dev.snapbudget.domain.ManualExpenseDraft
+import dev.snapbudget.domain.UpdateExpenseResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
@@ -52,6 +54,7 @@ class ConfirmManualExpenseTest {
             thrown?.let { throw it }
             return if (results.isEmpty()) AddExpenseResult.Failed else results.removeFirst()
         }
+        override suspend fun updateExpense(draft: ExpenseEditDraft): UpdateExpenseResult = UpdateExpenseResult.Missing
         override suspend fun deleteExpense(id: Long): Boolean = id > 0
     }
 }

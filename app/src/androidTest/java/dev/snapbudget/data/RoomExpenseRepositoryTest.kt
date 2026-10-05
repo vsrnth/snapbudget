@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.snapbudget.ExpenseDatabase
 import dev.snapbudget.domain.AddExpenseResult
 import dev.snapbudget.domain.ExpenseObservation
+import dev.snapbudget.domain.ExpenseEditDraft
 import dev.snapbudget.domain.ManualExpenseDraft
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -19,6 +20,58 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class RoomExpenseRepositoryTest {
+    @Test fun editUpdatesFieldsOrderAndPersistsWithoutChangingManualOperationIdentity() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "manual-expense-edit-${UUID.randomUUID()}.db"
+        val token = "manual:edit-${UUID.randomUUID()}"
+        val earlier = ManualExpenseDraft.createWithToken("5", "First Cafe", "2025-05-01T09:00", "Other", token)!!
+        val edit: ExpenseEditDraft
+        val firstId: Long
+        try {
+            val database = Room.databaseBuilder(context, ExpenseDatabase::class.java, name).build()
+            try {
+                val repository = RoomExpenseRepository(database.expenses())
+                val later = ManualExpenseDraft.createWithToken("7", "Second Cafe", "2025-05-02T09:00", "Other", "manual:other-${UUID.randomUUID()}")!!
+                firstId = (repository.addManualExpense(earlier) as AddExpenseResult.Inserted).id
+                val secondId = (repository.addManualExpense(later) as AddExpenseResult.Inserted).id
+                assertEquals(listOf(secondId, firstId), (withTimeout(3_000) { repository.observeExpenses().first() } as ExpenseObservation.Records).expenses.map { it.id })
+
+                edit = ExpenseEditDraft.create(firstId, "19.25", " Edited Cafe ", "2025-05-03T11:30", "Food")!!
+                assertEquals(dev.snapbudget.domain.UpdateExpenseResult.Updated, repository.updateExpense(edit))
+                val updated = withTimeout(3_000) { repository.observeExpenses().first() as ExpenseObservation.Records }
+                assertEquals(listOf(firstId, secondId), updated.expenses.map { it.id })
+                assertEquals(1_925L, updated.expenses.first().amountPaise)
+                assertEquals("Edited Cafe", updated.expenses.first().merchant)
+                assertEquals("Food", updated.expenses.first().category)
+                assertEquals("2025-05-03T11:30", updated.expenses.first().dateTime.toString())
+                val stored = withTimeout(3_000) { database.expenses().observe().first() }.single { it.id == firstId }
+                assertEquals(token, stored.imageHash)
+                assertEquals(null, stored.transactionId)
+                assertEquals(AddExpenseResult.Duplicate, repository.addManualExpense(earlier))
+            } finally {
+                database.close()
+            }
+
+            val reopened = Room.databaseBuilder(context, ExpenseDatabase::class.java, name).build()
+            try {
+                val repository = RoomExpenseRepository(reopened.expenses())
+                val persisted = (withTimeout(3_000) { repository.observeExpenses().first() } as ExpenseObservation.Records).expenses
+                assertEquals(listOf("Edited Cafe", "Second Cafe"), persisted.map { it.merchant })
+                assertEquals(AddExpenseResult.Duplicate, repository.addManualExpense(earlier))
+                assertTrue(repository.deleteExpense(firstId))
+                assertEquals(dev.snapbudget.domain.UpdateExpenseResult.Missing, repository.updateExpense(edit))
+                assertEquals(listOf("Second Cafe"), (withTimeout(3_000) { repository.observeExpenses().first() } as ExpenseObservation.Records).expenses.map { it.merchant })
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            context.deleteDatabase(name)
+            assertFalse(context.getDatabasePath(name).exists())
+            assertFalse(context.getDatabasePath("$name-wal").exists())
+            assertFalse(context.getDatabasePath("$name-shm").exists())
+        }
+    }
+
     @Test fun insertRetryReopenObserveAndDeleteUseLocalRoomDatabase() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "manual-expense-${UUID.randomUUID()}.db"

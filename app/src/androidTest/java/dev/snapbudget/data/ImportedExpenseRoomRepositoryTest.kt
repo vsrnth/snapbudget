@@ -6,8 +6,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.snapbudget.ExpenseDatabase
 import dev.snapbudget.domain.AddExpenseResult
 import dev.snapbudget.domain.ExpenseObservation
+import dev.snapbudget.domain.ExpenseEditDraft
 import dev.snapbudget.domain.ImportedExpenseDraft
 import dev.snapbudget.domain.ManualExpenseDraft
+import dev.snapbudget.domain.UpdateExpenseResult
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -46,6 +48,17 @@ class ImportedExpenseRoomRepositoryTest {
                 assertTrue(repository.addImportedExpense(draft(hashB, "T223456789012345")) is AddExpenseResult.Inserted)
                 assertTrue(repository.addImportedExpense(draft(hashC, null)) is AddExpenseResult.Inserted)
 
+                val edit = ExpenseEditDraft.create(id, "73.40", "User Corrected Merchant", "2025-05-04T08:15", "Food")!!
+                assertEquals(UpdateExpenseResult.Updated, repository.updateExpense(edit))
+                assertEquals(
+                    AddExpenseResult.Duplicate,
+                    repository.addImportedExpense(draft(hashA, "T323456789012345", amount = 99_999L, merchant = "Different Fields")),
+                )
+                assertEquals(
+                    AddExpenseResult.Duplicate,
+                    repository.addImportedExpense(draft("d".repeat(64), "T123456789012345", amount = 99_999L, merchant = "Different Fields")),
+                )
+
                 val manualDraft = ManualExpenseDraft.createWithToken(
                     "4.25", "Manual Cafe", "2025-05-04T12:30", "Other", "manual:import-compat-${UUID.randomUUID()}",
                 )!!
@@ -54,13 +67,15 @@ class ImportedExpenseRoomRepositoryTest {
                 val rows = withTimeout(3_000) { repository.observeExpenses().first() } as ExpenseObservation.Records
                 assertEquals(4, rows.expenses.size)
                 val original = rows.expenses.single { it.id == id }
-                assertEquals(12_550L, original.amountPaise)
-                assertEquals("Original Merchant", original.merchant)
+                assertEquals(7_340L, original.amountPaise)
+                assertEquals("User Corrected Merchant", original.merchant)
+                assertEquals("2025-05-04T08:15", original.dateTime.toString())
+                assertEquals("Food", original.category)
                 val storedOriginal = withTimeout(3_000) { first.expenses().observe().first() }.single { it.id == id }
                 assertEquals(hashA, storedOriginal.imageHash)
                 assertEquals("T123456789012345", storedOriginal.transactionId)
-                assertEquals("2025-05-03T21:41", storedOriginal.dateTime)
-                assertEquals("Other", storedOriginal.category)
+                assertEquals("2025-05-04T08:15", storedOriginal.dateTime)
+                assertEquals("Food", storedOriginal.category)
             } finally {
                 first.close()
             }
@@ -69,7 +84,7 @@ class ImportedExpenseRoomRepositoryTest {
             try {
                 val rows = withTimeout(3_000) { RoomExpenseRepository(reopened.expenses()).observeExpenses().first() } as ExpenseObservation.Records
                 assertEquals(4, rows.expenses.size)
-                assertTrue(rows.expenses.any { it.id == id && it.merchant == "Original Merchant" })
+                assertTrue(rows.expenses.any { it.id == id && it.merchant == "User Corrected Merchant" })
             } finally {
                 reopened.close()
             }
